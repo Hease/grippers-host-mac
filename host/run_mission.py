@@ -458,6 +458,7 @@ def _run_mission(args) -> int:
                 state=fsm.state.name, pose=pose, cmd=fsm.last_cmd,
                 target=fsm.target_label, report=link.last_report,
                 base_alarm=getattr(link, "base_alarm", None),
+                arm_link_alarm=getattr(link, "arm_link_alarm", None),
                 ready=fsm.ready_to_advance, hz=_last_hz)
 
             if fsm.state == State.SEARCH_TARGET and frames_seen % 10 == 0:

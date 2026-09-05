@@ -107,6 +107,11 @@ class MissionLogger:
     _events: int = 0
     _report_counts: dict = field(default_factory=dict)
     _alarms: list = field(default_factory=list)
+    # 그리퍼/팔 버스 경보(2026-09-06, Report.ARM_LINK_DEGRADED) — base_alarm과
+    # 같은 이유로 별도 칸에 둔다. 한 칸에 섞으면 요약에서 "바퀴 경보 3건"에
+    # 그리퍼 경보가 섞여 원인 구분이 안 된다.
+    _last_arm_link_alarm: Optional[str] = None
+    _arm_link_alarms: list = field(default_factory=list)
 
     def __post_init__(self) -> None:
         if self.path is None:
@@ -123,6 +128,7 @@ class MissionLogger:
     def record(self, *, state: str, pose, cmd: Optional[str],
                target: Optional[str] = None, report=None,
                base_alarm: Optional[str] = None,
+               arm_link_alarm: Optional[str] = None,
                ready: Optional[bool] = None,
                hz: Optional[float] = None) -> None:
         """한 사이클. 사건이 있으면 터미널에도 찍는다."""
@@ -130,7 +136,7 @@ class MissionLogger:
         self._cycles += 1
 
         self._write_jsonl(now, state, pose, cmd, target, report,
-                          base_alarm, ready, hz)
+                          base_alarm, arm_link_alarm, ready, hz)
 
         # ① 구동계 경보가 가장 급하다 — 먼저 찍는다.
         if base_alarm and base_alarm != self._last_alarm:
@@ -139,6 +145,13 @@ class MissionLogger:
             # Pi 가 보내는 문장이 이미 "구동계 이상 (...)"으로 시작한다 —
             # 여기서 또 붙이면 "구동계 구동계"가 된다.
             self._event(now, f"🚨 {base_alarm}")
+
+        # ①-2 그리퍼/팔 버스 경보 (2026-09-06). 바퀴 경보 다음으로 급하다 —
+        # 이게 원인이면 바퀴 쪽에서 "안 돈다"만 보고 헤매게 된다.
+        if arm_link_alarm and arm_link_alarm != self._last_arm_link_alarm:
+            self._last_arm_link_alarm = arm_link_alarm
+            self._arm_link_alarms.append((now - self._t0, arm_link_alarm))
+            self._event(now, f"⚠️ {arm_link_alarm}")
 
         # ② 상태 전이.
         if state != self._last_state:
@@ -211,6 +224,17 @@ class MissionLogger:
         else:
             lines.append("구동계 경보 없음")
 
+        lines.append("")
+        if self._arm_link_alarms:
+            lines.append(f"⚠️ 그리퍼/팔 버스 경보 {len(self._arm_link_alarms)}건 "
+                         "(2026-09-06, Report.ARM_LINK_DEGRADED)")
+            for at, detail in self._arm_link_alarms:
+                lines.append(f"  [{at:7.1f}s] {detail}")
+            lines.append("  ▶ 이 시간대에 바퀴가 안 도는 것처럼 보였다면 "
+                         "원인은 바퀴가 아니라 그리퍼/팔 버스일 수 있습니다.")
+        else:
+            lines.append("그리퍼/팔 버스 경보 없음")
+
         if self.path is not None:
             lines.append("")
             lines.append(f"기록: {self.path}")
@@ -248,7 +272,7 @@ class MissionLogger:
             self._text.flush()      # 실기 도중 죽어도 여기까지는 남는다
 
     def _write_jsonl(self, now, state, pose, cmd, target, report,
-                     base_alarm, ready, hz) -> None:
+                     base_alarm, arm_link_alarm, ready, hz) -> None:
         if self._jsonl is None:
             return
         row = {
@@ -273,6 +297,8 @@ class MissionLogger:
             row["report"] = list(report) if isinstance(report, tuple) else report
         if base_alarm:
             row["base_alarm"] = base_alarm
+        if arm_link_alarm:
+            row["arm_link_alarm"] = arm_link_alarm
         if hz:
             row["hz"] = round(hz, 2)
         self._jsonl.write(json.dumps(row, ensure_ascii=False) + "\n")

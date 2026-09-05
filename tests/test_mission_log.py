@@ -132,6 +132,57 @@ def test_같은_경보를_반복해도_한_건으로_센다(tmp_path):
     assert "구동계 경보 1건" in summary
 
 
+# ── 그리퍼/팔 버스 경보 (2026-09-06) ─────────────────────────────────────────
+#
+# Report.ARM_LINK_DEGRADED — 원인은 그리퍼/팔 버스인데 증상은 바퀴가 안 도는
+# 것으로 나타나므로, base_alarm과 같은 칸에 섞지 않고 따로 센다(섞으면
+# "구동계 경보 3건"에 원인이 다른 것이 섞여 헷갈린다).
+
+
+def test_그리퍼_버스_경보는_요약에_반드시_남는다(tmp_path):
+    log = _logger(tmp_path)
+    log.record(state="CARRY", pose=FakePose(), cmd="go",
+               arm_link_alarm="그리퍼 부하 읽기 3회 연속 실패 — 그리퍼/팔 버스 write_timeout 의심")
+    summary = log.summary()
+    log.close()
+
+    assert "⚠️" in summary
+    assert "그리퍼/팔 버스 경보 1건" in summary
+    assert "write_timeout" in summary
+
+
+def test_그리퍼_버스_경보가_없으면_없다고_적는다(tmp_path):
+    log = _logger(tmp_path)
+    log.record(state="SEARCH_TARGET", pose=FakePose(), cmd=None)
+    summary = log.summary()
+    log.close()
+
+    assert "그리퍼/팔 버스 경보 없음" in summary
+
+
+def test_같은_그리퍼_경보를_반복해도_한_건으로_센다(tmp_path):
+    log = _logger(tmp_path)
+    for _ in range(30):
+        log.record(state="CARRY", pose=FakePose(), cmd="go",
+                   arm_link_alarm="그리퍼 부하 읽기 3회 연속 실패 — 그리퍼/팔 버스 write_timeout 의심")
+    summary = log.summary()
+    log.close()
+
+    assert "그리퍼/팔 버스 경보 1건" in summary
+
+
+def test_구동계_경보와_그리퍼_버스_경보는_서로_다른_칸에_남는다(tmp_path):
+    """한쪽만 있어도 다른 쪽 요약(없음)이 같이 정확해야 원인 구분이 된다."""
+    log = _logger(tmp_path)
+    log.record(state="CARRY", pose=FakePose(), cmd="go",
+               arm_link_alarm="그리퍼 부하 읽기 3회 연속 실패")
+    summary = log.summary()
+    log.close()
+
+    assert "그리퍼/팔 버스 경보 1건" in summary
+    assert "구동계 경보 없음" in summary
+
+
 # ── JSONL ──────────────────────────────────────────────────────────────────
 
 

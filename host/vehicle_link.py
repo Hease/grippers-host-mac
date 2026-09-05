@@ -502,6 +502,13 @@ class VehicleLink:
     #: 경보가 있었다"가 남아 있어야 로그를 읽는 사람이 원인을 짚는다.
     base_alarm: Optional[str] = None
 
+    #: 그리퍼/팔 버스 통신이 연속 실패했다고 Pi 가 알려 온 마지막 사유
+    #: (2026-09-06, Report.ARM_LINK_DEGRADED). base_alarm 과 같은 이유로
+    #: 한 번 뜨면 지우지 않는다 — 증상은 바퀴가 안 도는 것으로 보이지만
+    #: 원인은 여기라, 로그를 나중에 읽는 사람이 바퀴 쪽을 의심하지 않게
+    #: 남겨 둔다.
+    arm_link_alarm: Optional[str] = None
+
     #: 마지막 INSERT_BLOCKED 가 요청한 재정렬. GRASP 쪽과 칸을 나눠 두는
     #: 이유: 한 칸에 두면 GRASP 의 `take_correction()` 이 바구니 보정을 집어
     #: 가서 기물 앞에서 엉뚱하게 움직인다(sysy009 도 같은 이유로 나눴다).
@@ -606,6 +613,7 @@ class UdpVehicleLink(VehicleLink):
         self.last_report: Optional[tuple[str, str, str]] = None
         self.last_insert_correction: Optional[GraspCorrection] = None
         self.base_alarm: Optional[str] = None
+        self.arm_link_alarm: Optional[str] = None
         self._warn_seen: dict[str, tuple[float, int]] = {}
 
         # INSERT 는 두 번 보고된다: INSERT_DONE(또는 INSERT_FAILED) 다음에
@@ -731,6 +739,20 @@ class UdpVehicleLink(VehicleLink):
                        f"🚨 구동계 이상 [{state}] {detail}\n"
                        f"   소프트웨어 정지가 바퀴까지 닿지 않을 수 있습니다.\n"
                        f"   ▶ 차체 전원 스위치를 쓰세요. 그게 진짜 비상정지입니다.\n"
+                       f"{'=' * 64}")
+            return "BUSY"
+
+        if report == Report.ARM_LINK_DEGRADED:
+            # 그리퍼/팔 버스 통신이 연속 실패한다 (2026-09-06 — 벤더 드라이버
+            # write_timeout 결함 후속). BASE_UNRESPONSIVE 와 달리 바퀴 자체는
+            # 멀쩡하다 — 다만 Pi 쪽 CARRY 사이클이 이 정지로 늦어져 STM32
+            # 모터 워치독이 대신 걸리므로, 화면만 보면 바퀴가 안 도는 것으로
+            # 보인다. 그래서 여기서 "바퀴 아니라 그리퍼"라고 명시한다.
+            self.arm_link_alarm = detail
+            self._warn(f"\n{'=' * 64}\n"
+                       f"⚠️  그리퍼 통신 이상 [{state}] {detail}\n"
+                       f"   바퀴가 안 도는 것처럼 보일 수 있지만 원인은 그리퍼/팔 쪽입니다.\n"
+                       f"   (벤더 드라이버 write_timeout — grippers.md Phase 11 참고)\n"
                        f"{'=' * 64}")
             return "BUSY"
 
