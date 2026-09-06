@@ -93,6 +93,23 @@ def _on_sigint(signum, frame):
     _stop = True
 
 
+def _drop_boxed_pieces(pmap: PieceMap) -> PieceMap:
+    """작업 영역(cfg.WORKSPACE_X/Y) 밖 좌표 — 즉 목적지 상자에 이미 들어간
+    물체 — 를 지도 전체에서 뺀다(2026-09-06, 사용자 지시 — "바구니 안
+    물체는 전체 FSM에서 배제하고 LiveMap에도 뜨지 않게").
+
+    예전에는 mission._nearest_piece/_find_label(타겟 후보 선정)에만 이
+    필터가 있었다 — 그래서 상자 안 물체가 다음 타겟으로는 안 잡혀도,
+    mission._other_pieces(장애물 목록)와 LiveMap 표시에는 그대로 남아
+    있었다. RETURN_HOME처럼 obstacles를 exclude_xy 없이 통째로 쓰는
+    구간에서는 이게 그대로 가짜 장애물이 됐다. tracker.update() 직후,
+    fsm.step()과 live_map.update()에 pmap이 갈라지기 **전**인 이 한
+    지점에서 걸러내면 그 이후 모든 소비자가 자동으로 혜택을 받는다."""
+    return {
+        label: [p for p in pts if cfg.in_workspace(p[0], p[1])]
+        for label, pts in pmap.items()
+    }
+
 
 def main() -> int:
     ap = argparse.ArgumentParser()
@@ -380,7 +397,25 @@ def _run_mission(args) -> int:
 
             obs_lists = [piece_map.pieces_from_prediction(cam, pred)
                          for cam, pred in zip(cams, preds)]
-            pmap = tracker.update(obs_lists)
+            # 2026-09-06, 사용자 지시 — "손 든 상태에서 새 관측 억제".
+            # GRASP를 마치고(target_label이 그대로 남아 있고) 아직 안
+            # 내려놓은(PLACE 완료 전) 구간에서는 그 라벨의 새 트랙 생성을
+            # 막는다 — 그리퍼에 들려 이동 중인 물체가 원래 자리와 먼
+            # 곳에서 순간 오검출돼 유령 트랙(=지도에 잠깐 떴다 사라짐)이
+            # 생기는 것을 막는다. GRASP/GRASP_ALIGN/GRASP_REPLAN(아직 파지
+            # 시도 중 — 실패하면 물체가 바닥에 그대로 있어야 한다)과
+            # RETURN_HOME(이미 내려놓아 target_label이 None으로 지워진
+            # 뒤)은 대상이 아니다 — piece_map.PieceTracker.update() docstring
+            # 참고.
+            carrying_labels = (
+                {fsm.target_label}
+                if fsm.state in (State.CARRY_TO_DEST, State.FACE_BOX,
+                                 State.NUDGE_BOX, State.PLACE)
+                and fsm.target_label is not None
+                else None
+            )
+            pmap = tracker.update(obs_lists, suppress_new_for=carrying_labels)
+            pmap = _drop_boxed_pieces(pmap)
             _t_geti = time.perf_counter(); hz_acc["geti"] += _t_geti - _t_cap
 
             fsm.step(pose, pmap, link)
