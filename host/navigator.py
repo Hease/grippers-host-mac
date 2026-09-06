@@ -334,6 +334,10 @@ _DIRS = ((1, 0), (1, 1), (0, 1), (-1, 1), (-1, 0), (-1, -1), (0, -1), (1, -1))
 # 한 칸 이동 거리(정수). 대각은 sqrt(2) 배.
 _STEP = tuple(141 if dx and dy else 100 for dx, dy in _DIRS)
 
+# 각 방향의 단위벡터 — PATH_DIRECTION_CONTINUITY_WEIGHT 가 이전 방향과의
+# 코사인 유사도를 잴 때 쓴다(대각 방향은 크기가 sqrt(2)이므로 정규화 필요).
+_DIR_UNIT = tuple((dx / math.hypot(dx, dy), dy / math.hypot(dx, dy)) for dx, dy in _DIRS)
+
 
 class GridPathPlanner:
     """주행영역 격자에서 회전량이 가장 적은 경로를 찾는다.
@@ -360,14 +364,24 @@ class GridPathPlanner:
         # update()의 "왜 위치로 얼리는가" 주석 참고.
         self._frozen_result: Optional[tuple[XY, Optional[XY], Optional[str]]] = None
         self._frozen_robot_xy: Optional[XY] = None
+        # 마지막으로 낸 sub_goal의 방향(단위벡터) — 2026-09-06,
+        # PATH_DIRECTION_CONTINUITY_WEIGHT 정의부 참고. None이면 이력이
+        # 없다는 뜻(구간 시작 직후)이라 가중치를 안 준다.
+        self._last_direction: Optional[XY] = None
 
     def reset(self) -> None:
         """구간이 바뀔 때 부른다. 경로는 매 사이클 처음부터 다시 짜므로
         지울 상태는 화면 표시용 last_path 뿐이다 — 얼려 둔 결과도 새
-        구간과 섞이면 안 되니 같이 지운다."""
+        구간과 섞이면 안 되니 같이 지운다.
+
+        방향 이력(_last_direction)도 같이 지운다 — 다른 목표로 향하는 새
+        구간의 방향을 이전 구간의 방향과 섞으면 안 된다(DriveSequencer의
+        회전 토글 워치독이 reset()에서 같은 이유로 이력을 지우는 것과
+        같다)."""
         self.last_path = None
         self._frozen_result = None
         self._frozen_robot_xy = None
+        self._last_direction = None
 
     # -- 격자 -------------------------------------------------------------
     def _pos(self, i: int, j: int) -> XY:
@@ -446,7 +460,7 @@ class GridPathPlanner:
             # 기물을 뚫고 간다.
             return _freeze((robot_xy, None, "blocked"))
 
-        cells = self._search(start, goal_mask, free)
+        cells = self._search(start, goal_mask, free, self._last_direction)
         if cells is None or len(cells) < 2:
             return _freeze((target_xy, None, None))     # 이미 도착 거리 안
 
@@ -455,6 +469,14 @@ class GridPathPlanner:
         self.last_path = pts
         sub_goal = pts[1]
         corner = pts[2] if len(pts) > 2 else None
+        # 다음 사이클의 방향 연속성 가중치가 쓸 이력을 갱신한다. sub_goal이
+        # robot_xy와 사실상 같으면(도착 직전 등) 방향이 정의되지 않으므로
+        # 이전 값을 그대로 둔다 — 0벡터로 덮어쓰면 다음 코사인 유사도가
+        # 항상 0이 되어 가중치가 무의미해진다.
+        dir_dx, dir_dy = sub_goal[0] - robot_xy[0], sub_goal[1] - robot_xy[1]
+        dir_norm = math.hypot(dir_dx, dir_dy)
+        if dir_norm > 1e-6:
+            self._last_direction = (dir_dx / dir_norm, dir_dy / dir_norm)
         if unreachable:
             # 목표까지는 못 간다(기물이 자유공간을 갈라놨다). 갈 수 있는 데까지
             # 가 두면 기물을 하나씩 치우면서 길이 열린다. 뚫고 가지는 않는다.
@@ -570,12 +592,18 @@ class GridPathPlanner:
         mask[jj, ii] = True
         return mask, True
 
-    def _search(self, start, goal_mask: np.ndarray, free: np.ndarray):
+    def _search(self, start, goal_mask: np.ndarray, free: np.ndarray,
+                last_direction: Optional[XY] = None):
         """최단거리 경로를 칸 목록으로 돌려준다(8방향, 대각은 sqrt(2)).
 
         여기서 나온 계단 경로는 호출부에서 _smooth() 가 직선으로 편다.
         상태를 (칸번호 * 8 + 방향) 이 아니라 칸번호만으로 다뤄도 되는 이유는
         회전 비용을 안 쓰기 때문이다 — 상태 수가 8배 줄어 그만큼 빠르다.
+
+        `last_direction`(2026-09-06, PATH_DIRECTION_CONTINUITY_WEIGHT
+        정의부 참고)이 주어지면, **출발 칸에서 나가는 첫 이동에만** 그
+        방향과의 코사인 유사도에 따른 페널티를 얹는다 — 상태공간을 늘리지
+        않고 "지금 어느 쪽으로 나아갈지"에만 관성을 준다.
         """
         nx, ny = self.nx, self.ny
         flat = free.ravel()
@@ -583,6 +611,8 @@ class GridPathPlanner:
         s_idx = start[1] * nx + start[0]
         if goal_flat[s_idx]:
             return None                            # 이미 도착 거리 안
+
+        weight = mcfg.PATH_DIRECTION_CONTINUITY_WEIGHT
 
         INF = float("inf")
         best = [INF] * (nx * ny)
@@ -598,12 +628,19 @@ class GridPathPlanner:
                 found = cell
                 break
             i, j = cell % nx, cell // nx
+            is_start_cell = (cell == s_idx and last_direction is not None
+                              and weight > 0.0)
             for ni in range(8):
                 dx, dy = _DIRS[ni]
                 if not self._passable(flat, nx, ny, i, j, dx, dy, s_idx):
                     continue
                 c2 = (j + dy) * nx + (i + dx)
-                nc = cost + _STEP[ni]
+                step_cost = _STEP[ni]
+                if is_start_cell:
+                    ux, uy = _DIR_UNIT[ni]
+                    cos_sim = ux * last_direction[0] + uy * last_direction[1]
+                    step_cost += weight * (1.0 - cos_sim) * _STEP[ni]
+                nc = cost + step_cost
                 if nc < best[c2]:
                     best[c2] = nc
                     parent[c2] = cell
