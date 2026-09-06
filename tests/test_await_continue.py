@@ -14,20 +14,49 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
+import pytest
+
 _HOST = Path(__file__).resolve().parent.parent / "host"
 sys.path.insert(0, str(_HOST))
 sys.path.insert(0, str(_HOST / "aruco"))
 
+import mission                                # noqa: E402
 from mission import MissionFSM, State        # noqa: E402
 
 from conftest import PiSim                    # noqa: E402
 
 MAX_STEPS = 900
+_TICK = 1.0 / 14.0   # 실측 Host 루프 주기 — PiSim.dt와 같은 값
 
 
-def _run_until(fsm: MissionFSM, sim: PiSim, piece_map, states, max_steps=MAX_STEPS):
+class _FakeClock:
+    """State.PLACE_BACKOFF(2026-09-06)의 time.monotonic() 판정이 이 파일의
+    900-사이클 루프 안에서 실시간 1초를 기다리지 않고도 지나가게 한다 —
+    test_grasp_sweep.py와 같은 패턴이다."""
+
+    def __init__(self, start: float = 1000.0) -> None:
+        self.now = start
+
+    def __call__(self) -> float:
+        return self.now
+
+    def advance(self, dt: float) -> None:
+        self.now += dt
+
+
+@pytest.fixture(autouse=True)
+def _fake_clock(monkeypatch):
+    clock = _FakeClock()
+    monkeypatch.setattr(mission.time, "monotonic", clock)
+    return clock
+
+
+def _run_until(fsm: MissionFSM, sim: PiSim, piece_map, states, max_steps=MAX_STEPS,
+               clock: _FakeClock | None = None):
     """`states` 중 하나에 도달할 때까지 돌린다. 실패하면 예외."""
     for _ in range(max_steps):
+        if clock is not None:
+            clock.advance(_TICK)
         fsm.step(sim.pose(), piece_map, sim)
         if fsm.state in states:
             return fsm
@@ -50,25 +79,25 @@ def test_MissionFSM에_on_continue_on_stop_submit_next_command이_더는_없다(
     assert not hasattr(fsm, "submit_next_command")
 
 
-def test_그룹이_소진돼도_묻지_않고_곧장_RETURN_HOME으로_간다():
+def test_그룹이_소진돼도_묻지_않고_곧장_RETURN_HOME으로_간다(_fake_clock):
     """rook(chess)을 넣었는데 화면에 다른 기물이 하나도 없다 — 예전 같으면
     AWAIT_CONTINUE 로 갔을 상황이지만, 지금은 예외 없이 RETURN_HOME 이다."""
     sim = PiSim()
     fsm = MissionFSM()
     assert fsm.begin_carrying("rook")
-    _run_until(fsm, sim, {}, {State.RETURN_HOME})
+    _run_until(fsm, sim, {}, {State.RETURN_HOME}, clock=_fake_clock)
 
 
-def test_같은_그룹이_남아있어도_RETURN_HOME으로_간다():
+def test_같은_그룹이_남아있어도_RETURN_HOME으로_간다(_fake_clock):
     sim = PiSim()
     fsm = MissionFSM()
     assert fsm.begin_carrying("rook")
-    _run_until(fsm, sim, {"knight": [(0.9, 0.9)]}, {State.RETURN_HOME})
+    _run_until(fsm, sim, {"knight": [(0.9, 0.9)]}, {State.RETURN_HOME}, clock=_fake_clock)
 
 
-def test_RETURN_HOME은_기본_위치에_도착하면_곧장_SEARCH_TARGET으로_간다():
+def test_RETURN_HOME은_기본_위치에_도착하면_곧장_SEARCH_TARGET으로_간다(_fake_clock):
     sim = PiSim()
     fsm = MissionFSM()
     assert fsm.begin_carrying("rook")
-    _run_until(fsm, sim, {}, {State.RETURN_HOME})
-    _run_until(fsm, sim, {}, {State.SEARCH_TARGET})
+    _run_until(fsm, sim, {}, {State.RETURN_HOME}, clock=_fake_clock)
+    _run_until(fsm, sim, {}, {State.SEARCH_TARGET}, clock=_fake_clock)

@@ -14,16 +14,42 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
+import pytest
+
 _HOST = Path(__file__).resolve().parent.parent / "host"
 sys.path.insert(0, str(_HOST))
 sys.path.insert(0, str(_HOST / "aruco"))
 
+import mission                              # noqa: E402
 import mission_config as mcfg               # noqa: E402
 from mission import MissionFSM, State        # noqa: E402
 
 from conftest import PiSim                    # noqa: E402
 
 MAX_STEPS = 900
+_TICK = 1.0 / 14.0   # 실측 Host 루프 주기 — PiSim.dt와 같은 값
+
+
+class _FakeClock:
+    """PLACE_BACKOFF의 time.monotonic() 판정(2026-09-06)이 이 파일의
+    900-사이클 루프 안에서 실시간 1초를 기다리지 않고도 지나가게 한다 —
+    test_grasp_sweep.py/test_nudge_box_blocked_stall.py와 같은 패턴이다."""
+
+    def __init__(self, start: float = 1000.0) -> None:
+        self.now = start
+
+    def __call__(self) -> float:
+        return self.now
+
+    def advance(self, dt: float) -> None:
+        self.now += dt
+
+
+@pytest.fixture(autouse=True)
+def _fake_clock(monkeypatch):
+    clock = _FakeClock()
+    monkeypatch.setattr(mission.time, "monotonic", clock)
+    return clock
 
 # 2026-09-02~09-04 사이 한동안 AWAIT_CONTINUE(그룹이 화면에서 다 소진되면
 # RETURN_HOME 대신 사람에게 "계속할까요?"를 묻는 기능)가 있어서, 이 파일의
@@ -35,34 +61,38 @@ MAX_STEPS = 900
 _OTHER_CHESS_PIECE_REMAINS = {"knight": [(0.9, 0.9)]}
 
 
-def test_PLACE_완료는_SEARCH_TARGET이_아니라_RETURN_HOME으로_간다():
+def test_PLACE_완료는_SEARCH_TARGET이_아니라_RETURN_HOME으로_간다(_fake_clock):
     sim = PiSim()
     fsm = MissionFSM()
     assert fsm.begin_carrying("rook")
 
     # PLACE -> NUDGE_BOX 보정 왕복(정상 동작)과 진짜 완료를 구분해야 한다 —
-    # "직전이 PLACE였고 지금이 RETURN_HOME"인 순간만 완료로 본다
-    # (tests/test_basket_close_loop.py 의 _run_to_place_done 과 같은 이유).
+    # "직전이 PLACE였고 지금이 PLACE_BACKOFF/RETURN_HOME"인 순간만 완료로
+    # 본다(tests/test_basket_close_loop.py 의 _run_to_place_done 과 같은
+    # 이유). PLACE_BACKOFF는 2026-09-06에 PLACE와 RETURN_HOME 사이에 새로
+    # 끼어든 후진 단계라 정상 경유지로 허용한다.
     was_place = False
     for _ in range(MAX_STEPS):
         was_place = fsm.state == State.PLACE
+        _fake_clock.advance(_TICK)
         fsm.step(sim.pose(), _OTHER_CHESS_PIECE_REMAINS, sim)
-        if was_place and fsm.state == State.RETURN_HOME:
+        if was_place and fsm.state in (State.PLACE_BACKOFF, State.RETURN_HOME):
             break
         if was_place and fsm.state not in (State.PLACE, State.NUDGE_BOX):
             raise AssertionError(
                 f"PLACE에서 예상 밖의 상태({fsm.state.name})로 넘어갔다")
     else:
-        raise AssertionError("PLACE가 RETURN_HOME으로 끝나지 않았다")
+        raise AssertionError("PLACE가 PLACE_BACKOFF/RETURN_HOME으로 끝나지 않았다")
 
 
-def test_RETURN_HOME을_거쳐_결국_SEARCH_TARGET에_도착한다():
+def test_RETURN_HOME을_거쳐_결국_SEARCH_TARGET에_도착한다(_fake_clock):
     """중간에 한 번 쉬어 가는 것뿐, 다음 라운드로 계속 이어져야 한다."""
     sim = PiSim()
     fsm = MissionFSM()
     assert fsm.begin_carrying("rook")
 
     for n in range(1, MAX_STEPS + 1):
+        _fake_clock.advance(_TICK)
         fsm.step(sim.pose(), _OTHER_CHESS_PIECE_REMAINS, sim)
         if fsm.state == State.SEARCH_TARGET:
             break
@@ -71,13 +101,14 @@ def test_RETURN_HOME을_거쳐_결국_SEARCH_TARGET에_도착한다():
                               f"상태 {fsm.state.name}")
 
 
-def test_RETURN_HOME_도착지는_DEFAULT_HOME_XY다():
+def test_RETURN_HOME_도착지는_DEFAULT_HOME_XY다(_fake_clock):
     """다음 라운드가 항상 같은 자리에서 시작된다는 것을 좌표로 고정한다."""
     sim = PiSim()
     fsm = MissionFSM()
     assert fsm.begin_carrying("rook")
 
     for _ in range(MAX_STEPS):
+        _fake_clock.advance(_TICK)
         fsm.step(sim.pose(), _OTHER_CHESS_PIECE_REMAINS, sim)
         if fsm.state == State.SEARCH_TARGET:
             break

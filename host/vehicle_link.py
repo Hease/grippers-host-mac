@@ -141,6 +141,13 @@ _STATE_TO_PI = {
     # 씀)도 빠져 있었다. GRASP_ALIGN과 이유가 같다 — Pi 쪽에 특별한 판정이
     # 필요 없는 순수 주행이라 APPROACH로 보낸다.
     "RETURN_HOME":    MissionState.APPROACH,
+    # PLACE_BACKOFF(2026-09-06, 사용자 지시 — 투하 직후 회전 전 후진)도 같은
+    # 이유로 APPROACH다. "back"/"stop" 명령뿐이고 Pi 쪽 판정이 필요 없는
+    # 순수 주행이라 GRASP_ALIGN/RETURN_HOME과 다를 게 없다. ⚠️ 이 표를 또
+    # 빠뜨리면 GRASP_FORCE 사고(바로 위 주석)와 똑같이 encode()가 조용히
+    # IDLE+stop으로 대체해 버린다 — 투하 직후 매번 걸리는 흔한 경로이므로
+    # 빠지면 실기에서 바로 드러나겠지만, 그 전에 여기서 잡아야 한다.
+    "PLACE_BACKOFF":  MissionState.APPROACH,
     # 2026-09-05 테스트 전용 — manual_insert_probe.py만 이 이름을 쓴다.
     # mission.py(run_mission.py의 정식 미션 State)엔 이 이름이 없다 — 실제
     # 파지 없이 CARRY로 바로 들어가는 우회로라 정식 경로에 노출되면 안 된다
@@ -459,15 +466,20 @@ def encode(cmd: MissionCommand) -> HostCommand:
                   "— IDLE+정지로 대체해 보냄 (매핑 표 확인 필요)")
         return HostCommand(state=MissionState.IDLE, stop=True)
 
+    # host_state: Host 원본 상태 이름(cmd.status, 예: "RETURN_HOME") 그대로.
+    # Pi의 resolve_motion()이 RETURN_HOME 구간 속도 상향에만 쓴다
+    # (HostCommand.host_state 정의부 참고) — state(위 압축 어휘)와는 별개다.
     if cmd.cmd == "go":
         return HostCommand(state=state, linear_x=AGREED_LINEAR_MPS,
-                            yaw_correction_deg=cmd.yaw_correction_deg)
+                            yaw_correction_deg=cmd.yaw_correction_deg,
+                            host_state=cmd.status)
     if cmd.cmd == "back":
         # 예전 4어휘(go/stop/yaw+/yaw-)에는 후진이 없었다. 속도 형식으로
         # 바뀌면서 부호만 뒤집으면 되는 것이 됐다 — Pi 의 `_clamp` 가
         # copysign 이라 음수 크기를 그대로 잘라 준다. GRASP_ALIGN 이 쓴다.
         return HostCommand(state=state, linear_x=-AGREED_LINEAR_MPS,
-                            yaw_correction_deg=cmd.yaw_correction_deg)
+                            yaw_correction_deg=cmd.yaw_correction_deg,
+                            host_state=cmd.status)
     if cmd.cmd in ("left", "right"):
         # 메카넘 횡이동. 바구니 앞 좌우 정렬에만 쓴다 — 바구니와 나란한 채
         # 옆으로 밀려 있으면 거리도 yaw 도 정상으로 나오는데 물체는 바구니
@@ -478,17 +490,21 @@ def encode(cmd: MissionCommand) -> HostCommand:
         # 으로 linear_y 는 0.03 m/s 까지 실제로 돈다.
         sign = 1.0 if cmd.cmd == "left" else -1.0
         return HostCommand(state=state, linear_y=sign * AGREED_LINEAR_MPS,
-                            yaw_correction_deg=cmd.yaw_correction_deg)
+                            yaw_correction_deg=cmd.yaw_correction_deg,
+                            host_state=cmd.status)
     if cmd.cmd == "yaw+":
         return HostCommand(state=state, angular_z=AGREED_ROTATION_RAD_S,
-                            yaw_correction_deg=cmd.yaw_correction_deg)
+                            yaw_correction_deg=cmd.yaw_correction_deg,
+                            host_state=cmd.status)
     if cmd.cmd == "yaw-":
         return HostCommand(state=state, angular_z=-AGREED_ROTATION_RAD_S,
-                            yaw_correction_deg=cmd.yaw_correction_deg)
+                            yaw_correction_deg=cmd.yaw_correction_deg,
+                            host_state=cmd.status)
     # "stop" 과 모르는 값 전부 — 모르면 정지한다. PLACE/INSERT는 항상 이
     # 분기로 온다("stop", "PLACE") — safe_300 보정값이 실려 나가야 할
     # 자리가 바로 여기다.
-    return HostCommand(state=state, stop=True, yaw_correction_deg=cmd.yaw_correction_deg)
+    return HostCommand(state=state, stop=True, yaw_correction_deg=cmd.yaw_correction_deg,
+                        host_state=cmd.status)
 
 
 class VehicleLink:
@@ -643,6 +659,10 @@ class UdpVehicleLink(VehicleLink):
             # 다섯 필드(2026-08-26)에 여섯 번째로 추가 — udp_host_link.py의
             # 같은 필드 주석 참고.
             "yaw_correction_deg": host_cmd.yaw_correction_deg,
+            # 2026-09-06, RETURN_HOME 속도 상향 — 여기서 안 실으면 encode()가
+            # host_cmd.host_state를 채워도 전선에 안 나간다(바로 위
+            # yaw_correction_deg 필드가 2026-09-05에 겪은 것과 같은 함정).
+            "host_state": host_cmd.host_state,
         }).encode("utf-8")
         try:
             self._send_sock.sendto(payload, (self.pi_ip, self.cmd_port))

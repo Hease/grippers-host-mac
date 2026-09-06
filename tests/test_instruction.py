@@ -19,6 +19,7 @@ _HOST = Path(__file__).resolve().parent.parent / "host"
 sys.path.insert(0, str(_HOST))
 sys.path.insert(0, str(_HOST / "aruco"))
 
+import mission                                      # noqa: E402
 import mission_config as mcfg                       # noqa: E402
 from mission import MissionFSM, State                # noqa: E402
 
@@ -29,6 +30,28 @@ from conftest import PiSim                            # noqa: E402
 # loop.py 의 MAX_STEPS 주석 참고) — 여기는 그 위에 두 번째 기물까지
 # 오가므로 더 넉넉히 둔다.
 MAX_STEPS = 900
+_TICK = 1.0 / 14.0   # 실측 Host 루프 주기 — PiSim.dt와 같은 값
+
+
+class _FakeClock:
+    """State.PLACE_BACKOFF(2026-09-06)의 time.monotonic() 판정이 이 파일의
+    사이클 루프 안에서 실시간 1초를 기다리지 않고도 지나가게 한다."""
+
+    def __init__(self, start: float = 1000.0) -> None:
+        self.now = start
+
+    def __call__(self) -> float:
+        return self.now
+
+    def advance(self, dt: float) -> None:
+        self.now += dt
+
+
+@pytest.fixture(autouse=True)
+def _fake_clock(monkeypatch):
+    clock = _FakeClock()
+    monkeypatch.setattr(mission.time, "monotonic", clock)
+    return clock
 
 
 class AutoDonePi(PiSim):
@@ -43,8 +66,10 @@ class AutoDonePi(PiSim):
         return super().poll_status()
 
 
-def _run_until(fsm, link, pmap, predicate, max_steps=MAX_STEPS):
+def _run_until(fsm, link, pmap, predicate, max_steps=MAX_STEPS, clock=None):
     for n in range(1, max_steps + 1):
+        if clock is not None:
+            clock.advance(_TICK)
         fsm.step(link.pose(), pmap, link)
         if predicate(fsm):
             return n
@@ -158,13 +183,14 @@ def test_손이_안_비었으면_큐에_쌓이고_즉시_적용되지_않는다(
     assert fsm._queued_instruction_label == "queen"
 
 
-def test_큐에_쌓인_지시는_PLACE_완료_후_적용된다():
+def test_큐에_쌓인_지시는_PLACE_완료_후_적용된다(_fake_clock):
     fsm = MissionFSM()
     link = AutoDonePi(x=1.271, y=1.0, yaw_deg=90.0)
     pmap = {"rook": [(1.0, 1.0)], "queen": [(0.3, 1.2)]}
 
     # rook 을 먼저 잡아 나르는 중.
-    _run_until(fsm, link, pmap, lambda f: f.state == State.CARRY_TO_DEST)
+    _run_until(fsm, link, pmap, lambda f: f.state == State.CARRY_TO_DEST,
+              clock=_fake_clock)
     assert fsm.target_label == "rook"
 
     # 그 도중 새 지시 — 손이 안 비었으니 큐에 쌓인다.
@@ -173,7 +199,8 @@ def test_큐에_쌓인_지시는_PLACE_완료_후_적용된다():
 
     # rook 을 마저 상자에 넣고 SEARCH_TARGET 으로 돌아올 때까지 진행.
     _run_until(fsm, link, pmap,
-              lambda f: f.state == State.APPROACH_PIECE and f.target_label == "queen")
+              lambda f: f.state == State.APPROACH_PIECE and f.target_label == "queen",
+              clock=_fake_clock)
 
     assert fsm.dest_xy == mcfg.DELIVER_HERE_XY
 

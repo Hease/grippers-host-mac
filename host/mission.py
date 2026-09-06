@@ -54,6 +54,11 @@ class State(Enum):
     FACE_BOX = auto()          # 상자 접근 부채꼴 진입 후 목표중심 방향(동적, 2026-09-05)으로 제자리 회전
     NUDGE_BOX = auto()         # 그 방향으로 BOX_NUDGE_M 만큼만 더 전진하고 정지
     PLACE = auto()             # 차량이 SmolVLA 로 내려놓는 동안 대기
+    # 투하 직후 제자리 회전 전에 잠깐 후진(2026-09-06, 사용자 지시) — 투하
+    # 직후 위치는 정면이 상자에 가장 가까운 자리라, 곧장 제자리 회전을 하면
+    # 차체나 팔이 상자를 스치는 접촉이 실기에서 관측됐다. RETURN_HOME의
+    # 경로 재계산(회전 포함)에 들어가기 전에 상자에서 조금 물러난다.
+    PLACE_BACKOFF = auto()
     RETURN_HOME = auto()       # 기물을 포기했거나 하나를 다 옮긴 뒤 mcfg.DEFAULT_HOME_XY 로 복귀 중
     DONE = auto()
 
@@ -69,6 +74,26 @@ def _other_pieces(piece_map: PieceMap, exclude_xy: Optional[XY] = None,
     if exclude_xy is None:
         return pts
     return [p for p in pts if math.hypot(p[0] - exclude_xy[0], p[1] - exclude_xy[1]) > tol]
+
+
+def _backoff_blocked(piece_map: PieceMap, robot_xy: XY, yaw_deg: float,
+                      distance_m: float, radius_m: float) -> bool:
+    """State.PLACE_BACKOFF가 지금부터 `distance_m`만큼 후진할 자리 주변
+    `radius_m` 안에 다른 기물이 있는지(2026-09-06, 사용자 지시).
+
+    바구니 자체는 검사 대상이 아니다 — PLACE 직후 로봇은 바구니를 마주보고
+    서 있으므로 후진은 바구니에서 **멀어지는** 방향이다(사용자가 우려한
+    접촉은 그다음의 제자리 회전에서 생긴다 — 그건 이 상태가 아니라
+    RETURN_HOME의 경로 재계산이 처리한다). 여기서 막아야 하는 건 로봇
+    뒤쪽에 있을 수 있는 **다른** 기물(아직 안 옮긴 체스말 등)이다.
+
+    상자에서 이미 빠진(`_drop_boxed_pieces`) piece_map을 받는다는 전제라,
+    `_other_pieces`가 상자 안 물체까지 장애물로 잘못 잡는 일은 없다."""
+    heading_rad = math.radians(yaw_deg)
+    back_x = robot_xy[0] - math.cos(heading_rad) * distance_m
+    back_y = robot_xy[1] - math.sin(heading_rad) * distance_m
+    return any(math.hypot(p[0] - back_x, p[1] - back_y) <= radius_m
+               for p in _other_pieces(piece_map))
 
 
 def _nearest_piece(piece_map: PieceMap, robot_xy: XY,
@@ -404,6 +429,10 @@ class MissionFSM:
         # 포즈를 잃었을 때 즉시 "stop"을 보내기 위한 표시용 좌표(2026-09-02,
         # step() 의 pose.ok 분기 참고) — 차량 제어에는 안 쓰인다.
         self._last_good_pose: Optional[Pose] = None
+        # PLACE_BACKOFF 진입 시각(time.monotonic()) — 이 상태가 최대
+        # mcfg.BACKOFF_DURATION_SEC 동안만 후진하도록 잰다. None이면 아직
+        # 진입 전(또는 이미 빠져나간 뒤)이라는 뜻이다.
+        self._backoff_entered_at: Optional[float] = None
         self._nudge_from: Optional[XY] = None   # NUDGE_BOX 진입 시점의 위치
         # NUDGE_BOX 진입 시점의 방위(도) — axis가 rotate_left/rotate_right일
         # 때만 쓴다(제자리 회전이라 위치가 아니라 각도로 진행량을 잰다).
@@ -1734,9 +1763,46 @@ class MissionFSM:
                 self.target_label = None
                 self._target_xy = None
                 self.dest_xy = None
+                # 곧장 RETURN_HOME(경로 재계산 = 회전 포함)으로 가지 않고
+                # PLACE_BACKOFF를 먼저 거친다(2026-09-06, 사용자 지시) —
+                # State.PLACE_BACKOFF 정의부 참고. _path_planner/_drive의
+                # reset()은 PLACE_BACKOFF가 끝나고 실제로 RETURN_HOME에
+                # 들어갈 때 한다 — 이 상태는 경로계획기를 아예 안 쓴다.
+                self._backoff_entered_at = time.monotonic()
+                self.state = State.PLACE_BACKOFF
+
+        elif self.state == State.PLACE_BACKOFF:
+            # 투하 직후 위치는 바구니를 마주보고 선 자리라, 곧장 제자리
+            # 회전(RETURN_HOME의 경로 재계산)에 들어가면 차체/팔이 바구니를
+            # 스치는 접촉이 실기에서 관측됐다(2026-09-06, 사용자 지시).
+            # 회전 전에 mcfg.BACKOFF_DURATION_SEC 동안만 잠깐 물러난다.
+            #
+            # 뒤쪽(후진할 자리)에 다른 기물이 있다 싶으면 후진 자체를
+            # 포기하고 곧장 RETURN_HOME으로 넘긴다 — 그 회전 기반 경로
+            # 재계산이 사용자가 원래 우려했던 "후진 대신 회전으로" 폴백
+            # 역할을 그대로 한다.
+            if _backoff_blocked(piece_map, robot_xy, pose.yaw_deg,
+                                 mcfg.BACKOFF_CHECK_DISTANCE_M,
+                                 mcfg.BACKOFF_CHECK_RADIUS_M):
+                self.last_cmd = "stop"
+                link.send(MissionCommand("stop", "PLACE_BACKOFF",
+                                         pose.x, pose.y, pose.yaw_deg))
+                self._backoff_entered_at = None
                 self._path_planner.reset()
                 self._drive.reset()
                 self.state = State.RETURN_HOME
+            elif time.monotonic() - self._backoff_entered_at >= mcfg.BACKOFF_DURATION_SEC:
+                self.last_cmd = "stop"
+                link.send(MissionCommand("stop", "PLACE_BACKOFF",
+                                         pose.x, pose.y, pose.yaw_deg))
+                self._backoff_entered_at = None
+                self._path_planner.reset()
+                self._drive.reset()
+                self.state = State.RETURN_HOME
+            else:
+                self.last_cmd = "back"
+                link.send(MissionCommand("back", "PLACE_BACKOFF",
+                                         pose.x, pose.y, pose.yaw_deg))
 
         elif self.state == State.RETURN_HOME:
             # 기물을 포기한 뒤(_skip_target) 실패한 자리에 그대로 남지 않고

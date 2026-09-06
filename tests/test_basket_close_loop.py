@@ -26,9 +26,33 @@ _HOST = Path(__file__).resolve().parent.parent / "host"
 sys.path.insert(0, str(_HOST))
 
 import config as cfg                       # noqa: E402
+import mission                             # noqa: E402
 import mission_config as mcfg              # noqa: E402
 from mission import MissionFSM, State      # noqa: E402
 from vehicle_link import parse_basket_fix  # noqa: E402
+
+_TICK = 1.0 / 14.0   # 실측 Host 루프 주기 — PiSim.dt와 같은 값
+
+
+class _FakeClock:
+    """State.PLACE_BACKOFF(2026-09-06)의 time.monotonic() 판정이 이 파일의
+    사이클 루프 안에서 실시간 1초를 기다리지 않고도 지나가게 한다."""
+
+    def __init__(self, start: float = 1000.0) -> None:
+        self.now = start
+
+    def __call__(self) -> float:
+        return self.now
+
+    def advance(self, dt: float) -> None:
+        self.now += dt
+
+
+@pytest.fixture(autouse=True)
+def _fake_clock(monkeypatch):
+    clock = _FakeClock()
+    monkeypatch.setattr(mission.time, "monotonic", clock)
+    return clock
 
 
 @pytest.fixture(autouse=True)
@@ -64,11 +88,12 @@ MAX_STEPS = 800
 _OTHER_CHESS_PIECE_REMAINS = {"knight": [(0.9, 0.9)]}
 
 
-def _run(sim: PiSim, max_steps: int = MAX_STEPS) -> tuple[MissionFSM, int]:
+def _run(sim: PiSim, clock: _FakeClock, max_steps: int = MAX_STEPS) -> tuple[MissionFSM, int]:
     """룩을 든 상태로 시작해 PLACE 가 끝날 때까지 돌린다."""
     fsm = MissionFSM()
     assert fsm.begin_carrying("rook")
     for n in range(1, max_steps + 1):
+        clock.advance(_TICK)
         fsm.step(sim.pose(), _OTHER_CHESS_PIECE_REMAINS, sim)
         if fsm.state == State.SEARCH_TARGET:
             return fsm, n          # PLACE 를 끝내고 다음 대상을 찾으러 갔다
@@ -78,23 +103,25 @@ def _run(sim: PiSim, max_steps: int = MAX_STEPS) -> tuple[MissionFSM, int]:
         f"좌우 {sim.lateral_m * 1000:+.0f}mm")
 
 
-def _run_to_place_done(sim: PiSim, max_steps: int = MAX_STEPS) -> tuple[MissionFSM, int]:
+def _run_to_place_done(sim: PiSim, clock: _FakeClock,
+                        max_steps: int = MAX_STEPS) -> tuple[MissionFSM, int]:
     """룩을 든 상태로 시작해 PLACE 가 **막 끝나는 그 순간**까지 돌린다.
 
-    2026-09-02부터 PLACE 완료는 SEARCH_TARGET이 아니라 RETURN_HOME으로
-    이어진다(시연용, _skip_target과 같은 이유로 항상 같은 자리에서 다음
-    탐색을 시작하게 함). "바구니 앞에 어떻게 섰는가"를 보는 테스트는 그
-    뒤 RETURN_HOME으로 주행해 버린 좌표가 아니라 이 전이 순간의 좌표를
-    봐야 한다 — PLACE에서 NUDGE_BOX로 되돌아가는 보정 왕복(정상 동작)과
-    구분하려고, "직전이 PLACE였고 지금이 RETURN_HOME"인 순간만 완료로
-    본다."""
+    2026-09-02부터 PLACE 완료는 SEARCH_TARGET이 아니라 State.PLACE_BACKOFF
+    (2026-09-06, 투하 직후 회전 전 후진)를 거쳐 RETURN_HOME으로 이어진다
+    (시연용, _skip_target과 같은 이유로 항상 같은 자리에서 다음 탐색을
+    시작하게 함). "바구니 앞에 어떻게 섰는가"를 보는 테스트는 후진으로
+    이미 물러난 좌표가 아니라 이 전이 순간의 좌표를 봐야 한다 — PLACE에서
+    NUDGE_BOX로 되돌아가는 보정 왕복(정상 동작)과 구분하려고, "직전이
+    PLACE였고 지금이 PLACE_BACKOFF"인 순간만 완료로 본다."""
     fsm = MissionFSM()
     assert fsm.begin_carrying("rook")
     was_place = False
     for n in range(1, max_steps + 1):
         was_place = fsm.state == State.PLACE
+        clock.advance(_TICK)
         fsm.step(sim.pose(), _OTHER_CHESS_PIECE_REMAINS, sim)
-        if was_place and fsm.state == State.RETURN_HOME:
+        if was_place and fsm.state == State.PLACE_BACKOFF:
             return fsm, n
     pytest.fail(
         f"{max_steps} 사이클 안에 INSERT 를 못 끝냈다 — "
@@ -135,9 +162,9 @@ _SECTOR_APPROACH_OVERSHOOT_SKIP = (
 
 
 @pytest.mark.skip(reason=_SECTOR_APPROACH_OVERSHOOT_SKIP)
-def test_그날_막힌_자리에서_INSERT까지_간다():
+def test_그날_막힌_자리에서_INSERT까지_간다(_fake_clock):
     sim = PiSim()
-    fsm, steps = _run_to_place_done(sim)
+    fsm, steps = _run_to_place_done(sim, _fake_clock)
 
     # 도착 조건은 Pi 가 받아 주는 범위 안이어야 한다 — 그것도 **가장자리가
     # 아니라 여유를 두고**. 상한에 딱 붙어 서면 판독이 1mm 만 튀어도 다시
@@ -154,10 +181,10 @@ def test_그날_막힌_자리에서_INSERT까지_간다():
 
 
 @pytest.mark.skip(reason=_SECTOR_APPROACH_OVERSHOOT_SKIP)
-def test_횡이동_명령을_실제로_쓴다():
+def test_횡이동_명령을_실제로_쓴다(_fake_clock):
     """좌우 79mm 를 회전으로 고치려 들면 거리와 yaw 가 같이 틀어진다."""
     sim = PiSim()
-    _run(sim)
+    _run(sim, _fake_clock)
     cmds = {c for c, status in sim.sent if status == "NUDGE_BOX"}
     assert "go" in cmds
     assert cmds & {"left", "right"}, f"횡이동을 안 썼다 — 보낸 명령 {cmds}"
@@ -180,23 +207,24 @@ def test_거리를_먼저_맞추고_좌우를_나중에_본다():
     assert sim.lidar_m <= PI_STOP_LIDAR_M + PI_STOP_TOLERANCE_M
 
 
-def test_좌우를_모르면_거리만_맞추고_멈춘다():
+def test_좌우를_모르면_거리만_맞추고_멈춘다(_fake_clock):
     """`lateral_known=False` 는 0이 아니라 **모른다**는 뜻이다.
 
     바구니가 방위각 창을 양쪽 다 채우면 가장자리가 안 보여 중심을 못
     낸다. 그때 0으로 읽고 "가운데"라고 판단하면 물체가 바구니 밖에
     떨어진다 — Host 도 지어내지 말아야 한다."""
     sim = PiSim(lateral_known=False)
-    fsm, _ = _run_to_place_done(sim)
+    fsm, _ = _run_to_place_done(sim, _fake_clock)
     assert sim.lidar_m <= PI_STOP_LIDAR_M + PI_STOP_TOLERANCE_M
 
 
-def test_예산을_넘겨서까지_밀지_않는다():
+def test_예산을_넘겨서까지_밀지_않는다(_fake_clock):
     """판독이 이상해 같은 보정이 계속 나와도 바구니를 밀고 들어가면 안 된다."""
     sim = PiSim(freeze_lateral=True)     # 옆으로 가라고 해도 안 움직인다
     fsm = MissionFSM()
     fsm.begin_carrying("rook")
     for _ in range(MAX_STEPS):
+        _fake_clock.advance(_TICK)
         fsm.step(sim.pose(), {}, sim)
         if fsm.state == State.SEARCH_TARGET:
             break
