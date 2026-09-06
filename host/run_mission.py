@@ -87,6 +87,15 @@ except Exception as _exc:  # noqa: BLE001 -- 미설치·키 없음 등 다양한
 
 _stop = False
 
+# 시연 UI 훅 (2026-09-07). run_mission_ui.py 가 여기에 함수를 꽂으면 미션
+# 루프가 매 사이클 `on_cycle(pose, pmap, fsm, link)` 로 부른다. None 이면
+# 아무 일도 안 일어난다 — 이 파일을 그냥 실행할 때의 동작은 전과 같다.
+#
+# 왜 콜백인가: pywebview 창은 macOS 에서 메인 스레드를 요구하는데 그 자리는
+# main() 의 루프가 쓰고 있다. 루프를 함수로 떼어내 스레드로 넘기면 이 파일이
+# 크게 바뀌어 팀원 쪽 변경과 매번 충돌한다. 훅 한 줄이면 그럴 일이 없다.
+on_cycle = None
+
 
 def _on_sigint(signum, frame):
     global _stop
@@ -499,6 +508,14 @@ def _run_mission(args) -> int:
             if fsm.state == State.SEARCH_TARGET and frames_seen % 10 == 0:
                 print(f"\r[SEARCH_TARGET] 작업 영역에 남은 기물 없음 — {pose}   ",
                       end="", flush=True)
+
+            # 화면 훅 (2026-09-07, 시연 UI 용). 기본값이 None 이라 아무도
+            # 채우지 않으면 이 파일의 동작은 전과 완전히 같다 — run_mission.py
+            # 를 그냥 실행하면 이 줄들은 없는 것과 같다.
+            # 채우는 쪽은 run_mission_ui.py 하나뿐이고, 거기서 pywebview 창을
+            # 메인 스레드에 두고 main() 을 배경으로 돌린다.
+            if on_cycle is not None:
+                on_cycle(pose, pmap, fsm, link)
 
             if live_map is not None:
                 live_map.update(pose, pmap, goal=fsm.nav_goal, nav=fsm.last_nav,

@@ -16,6 +16,11 @@
 | `ui_bridge.py` | pywebview 창 + JS 다리 |
 | `voice_input.py` | 로컬 Whisper 음성 입력 (선택) |
 | `run_sim_ui.py` | 카메라·모델·차량 없이 이 UI 만 돌리는 진입점 |
+| `run_mission_ui.py` | **실기용** — `run_mission.py` 에 이 UI 만 얹는다 |
+
+`run_mission.py` 는 17줄 늘었다(`on_cycle` 훅 선언 13줄 + 호출 4줄).
+기본값이 `None` 이라 **아무도 안 채우면 동작이 전과 완전히 같다** —
+`python run_mission.py` 를 그냥 돌리면 이 줄들은 없는 것과 같다.
 
 팀원 코드에서 읽어 오는 이름은 **`ui_state.py` 맨 위 "실기 FSM 결합부"
 한 블록**에 모여 있다. 그쪽이 바뀌어 화면이 깨지면 고칠 곳은 거기 하나다.
@@ -24,9 +29,23 @@
 
 ```
 cd host
-../.venv/bin/python run_sim_ui.py              # 차량 없이 (지금 가능)
-../.venv/bin/python run_sim_ui.py --fullscreen # 세로 모니터 전체화면
+
+# 1) 하드웨어 없이 — 지금 바로 됨
+../.venv/bin/python run_sim_ui.py
+../.venv/bin/python run_sim_ui.py --fullscreen      # 세로 모니터 전체화면
+../.venv/bin/python run_sim_ui.py --step            # 화면에서 한 단계씩
+../.venv/bin/python run_sim_ui.py --speed 0.6       # 빠르게
+
+# 2) 카메라 + 모델은 쓰고 차량은 안 씀 — model.bin 필요
+../.venv/bin/python run_mission_ui.py --mock-complete
+
+# 3) 실기 차량까지 — 사람이 지켜보는 상태에서만
+../.venv/bin/python run_mission_ui.py --vehicle-ip 192.168.0.7 --ui-fullscreen
 ```
+
+`run_mission.py` 의 인자는 전부 그대로 쓸 수 있다(`--cams`, `--category`,
+`--seconds` …). `--no-view` 는 자동으로 붙는다 — 예전 지도(matplotlib)와
+이 창은 둘 다 메인 스레드를 원해서 같이 못 뜬다.
 
 세로 모니터가 없으면 창이 화면 높이에 맞춰 줄어든다(`ui/app.js` 의
 `fitStage`, 배율 = `min(너비/432, 높이/768)`). 1080×1920 에서는 정확히
@@ -98,9 +117,22 @@ FSM 은 **멈추지 않는다** — `_skip_target()` 으로 그 기물을 `skipp
 | 정지 트레이(1m) | 실제 창에서 DOM 클릭으로 확인 — 라벨·문구·Prev/Next 숨김·LED 전부 목업대로 |
 | 비상 정지 → 정지 해제 | 실제 클릭으로 확인 — 정지·복귀 모두 정상 |
 
+## 실기 테스트에 필요한 것 (2026-09-07 기준)
+
+| | 상태 |
+|---|---|
+| `run_mission.py` 연결 | ✅ `run_mission_ui.py` 로 완료 |
+| `model.bin` (85MB) | ⬜ 없으면 geti 모델 로드에서 멈춘다. **그 앞 단계는 전부 통과하는 것을 확인했다** |
+| 탑뷰 C920 2대 | ⬜ 이 맥에는 내장 카메라뿐이다. `calib/cam0.npz`·`cam1.npz` 는 1280×720 로 이미 있으니 **그 캘리브레이션을 뜬 바로 그 카메라**를 쓰는 것이 좋다 |
+| 작업장 물리 세팅 | ⬜ 가벽 · 바닥 마커 M1–M4 · 상자 2개 · 카메라 높이 1.30 m |
+| macOS 카메라 권한 | ⬜ 터미널/앱에 허용 |
+| Pi | ⬜ 같은 서브넷 · `host_ip` 로 이 맥 주소 · `kica927/baseline_mission` 브랜치 |
+
+⚠️ macOS 는 C920 초점을 고정할 수 없다(저장소 README 참고). ArUco 정확도가
+Windows 만큼 안 나올 수 있으니, 웹캠 유틸리티로 미리 고정해 두는 편이 좋다.
+
 ## 아직 안 한 것
 
-- `run_mission.py` 연결 (실기 카메라 + 차량). 지금은 시뮬레이터만
 - 화면 push 비용 측정 — 위 2.7ms 는 상태 생성만이고 창에 밀어 넣는
   비용은 아직 안 쟀다. 워치독 여유(현재 2.1배)에 영향을 주므로 실기에
   붙이는 즉시 같이 재야 한다
