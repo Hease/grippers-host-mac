@@ -43,6 +43,7 @@ from mission import MissionFSM, State, visible_labels
 from ui_bridge import DemoUI
 from ui_state import PIECE_KO, UiState, resolve_label
 from ui_voice import Voice
+from home_policy import MODES as HOME_MODES, HomePolicy
 
 # 가상 차량·기물은 run_sim.py 것을 그대로 쓴다(베끼지 않는다).
 from run_sim import (SIM_HZ, SimRobot, SimVehicleLink, _copy_pieces,
@@ -72,6 +73,11 @@ def main() -> int:
     ap.add_argument("--fullscreen", action="store_true", help="세로 모니터 전체화면")
     ap.add_argument("--debug", action="store_true", help="창에서 개발자 도구를 연다")
     ap.add_argument("--quiet", action="store_true", help="명령 로그를 안 찍는다")
+    ap.add_argument("--home-policy", choices=HOME_MODES, default="always",
+                    help="기물을 하나 넣은 뒤 홈으로 돌아갈지. always=지금 실기 "
+                         "그대로 / end=마지막 하나를 넣은 뒤에만 / never=안 감. "
+                         "mission.py 는 안 고치고 전이만 밖에서 바꾼다 "
+                         "(home_policy.py 참고)")
     args = ap.parse_args()
 
     signal.signal(signal.SIGINT, _on_sigint)
@@ -91,6 +97,9 @@ def main() -> int:
     link = SimVehicleLink(quiet=args.quiet)
     uistate = UiState()
     voice = Voice(uistate)
+    home = HomePolicy(args.home_policy)
+    if args.home_policy != "always":
+        print(f"[복귀 정책] {args.home_policy} — 투하 뒤 홈 복귀를 바꿔 끼웁니다")
     if not voice.available:
         print(f"[음성] 사용 불가 — {voice.error}")
 
@@ -206,6 +215,8 @@ def main() -> int:
                     if carried:
                         _drop_piece(pieces, carried)
                     carried = None
+                # 복귀 정책 — 실기 FSM 은 그대로 두고 이 전이만 밖에서 덮는다.
+                home.after_step(fsm, prev_state, pieces)
                 prev_state = fsm.state
 
                 # 집기/놓기 중에는 바퀴가 멈춰 있어야 한다.

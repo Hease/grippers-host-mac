@@ -54,6 +54,7 @@ from mission import State, visible_labels
 from ui_bridge import DemoUI
 from ui_state import PIECE_KO, UiState, resolve_label
 from ui_voice import Voice
+from home_policy import MODES as HOME_MODES, HomePolicy
 from vehicle_link import MissionCommand
 
 # 화면에서 온 이벤트는 GUI 스레드에서 오고, FSM 은 미션 스레드가 돌린다.
@@ -72,6 +73,7 @@ class _Wire:
         self.pieces: dict = {}
         self.link_label = ""
         self.pending: list = []  # 화면에서 눌렀지만 아직 FSM 에 못 넘긴 것
+        self.prev_state = None   # 복귀 정책이 직전 상태를 봐야 한다
 
     # ── 화면 → 여기 (GUI 스레드) ─────────────────────────────
     def on_event(self, action: str, payload=None) -> None:
@@ -162,6 +164,24 @@ def main() -> int:
     argv = list(sys.argv[1:])
     fullscreen = "--ui-fullscreen" in argv
     debug = "--ui-debug" in argv
+    # --home-policy 는 이 파일 것이다(run_mission.py 는 모른다) — 넘기기 전에 뺀다.
+    policy = "always"
+    for i, a in enumerate(argv):
+        if a == "--home-policy" and i + 1 < len(argv):
+            policy = argv[i + 1]
+        elif a.startswith("--home-policy="):
+            policy = a.split("=", 1)[1]
+    if policy not in HOME_MODES:
+        print(f"--home-policy 는 {HOME_MODES} 중 하나여야 합니다: {policy!r}")
+        return 2
+    skip = set()
+    for i, a in enumerate(argv):
+        if a == "--home-policy":
+            skip.update({i, i + 1})
+        elif a.startswith("--home-policy="):
+            skip.add(i)
+    argv = [a for i, a in enumerate(argv) if i not in skip]
+
     argv = [a for a in argv if a not in ("--ui-fullscreen", "--ui-debug")]
     if "--no-view" not in argv:
         argv.append("--no-view")
@@ -172,6 +192,10 @@ def main() -> int:
     if not voice.available:
         print(f"[음성] 사용 불가 — {voice.error}")
     wire = _Wire(state, voice)
+    home = HomePolicy(policy)
+    if policy != "always":
+        print(f"[복귀 정책] {policy} — 투하 뒤 홈 복귀를 바꿔 끼웁니다 "
+              f"(mission.py 는 안 고침, home_policy.py 참고)")
     ui = DemoUI(on_event=wire.on_event, fullscreen=fullscreen, debug=debug)
 
     def cycle(pose, pmap, fsm, link) -> None:
@@ -180,6 +204,9 @@ def main() -> int:
         wire.pieces = pmap
         if not wire.link_label:
             wire.link_label = getattr(link, "label", None) or type(link).__name__
+        # 복귀 정책 — 이 훅은 fsm.step() 뒤에 불리므로 여기서 전이를 덮는다.
+        home.after_step(fsm, wire.prev_state, pmap)
+        wire.prev_state = fsm.state
         wire.drain()
         voice.poll()
 
