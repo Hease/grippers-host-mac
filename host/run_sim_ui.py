@@ -103,6 +103,11 @@ def main() -> int:
             fsm.set_manual_mode(not fsm.manual_mode)
             _reset_all()
         elif action in ("pick", "card_row"):
+            # "가장 가까운 것"(목업 1j) — 지시를 안 주면 FSM 이 원래 그렇게
+            # 고르므로 카드만 닫으면 된다.
+            if payload == "__nearest":
+                uistate.clear_card()
+                return
             # 맵에서 기물을 직접 눌렀다 — id 는 "queen#3" 꼴이라 앞부분이 라벨.
             label = str(payload or "").split("#")[0]
             if label:
@@ -123,8 +128,12 @@ def main() -> int:
                 fsm.set_instruction(hit)
                 uistate.notify("OK", f"대상: {PIECE_KO[hit]}", "success")
             else:
-                uistate.notify("E-402", "어떤 기물인지 모르겠어요 (시뮬레이터는 "
-                                        "기물 이름만 알아듣습니다)", "caution", ttl=4.5)
+                # 목업 1j — 지어내서 움직이지 않고 되묻는다. 지금 보이는
+                # 기물을 그대로 선택지로 낸다.
+                uistate.raise_unparseable(
+                    "어떤 기물을 말씀하시는 걸까요? 아래에서 고르셔도 되고, "
+                    "다시 말씀하셔도 됩니다.",
+                    sorted(visible_labels(pieces)))
         elif action == "mic":
             uistate.notify("W-000", "시뮬레이터에는 음성 입력이 없습니다 — "
                                     "입력창에 적어주세요", "caution")

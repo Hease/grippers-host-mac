@@ -332,6 +332,9 @@ html, body {
   background: var(--tray); border-top: 1px solid var(--hair);
 }
 .traygrow { flex: 1; }
+/* 목업 1m · HALTED — 정지 중에만. 색은 목업의 #FF8A8A 그대로(--error 보다 밝다:
+   정지 버튼 자체가 이미 빨간 면이라, 같은 빨강이면 글자가 그 위에서 안 읽힌다). */
+.haltnote { flex: 1; font: 700 12px var(--sans); color: #FF8A8A; margin-left: 10px; }
 /* 비상 정지는 접거나 숨기지 않고 항상 같은 자리(좌측 첫 칸)에 둔다 — 목업 1m. */
 .estop {
   display: flex; align-items: center; gap: 6px;
@@ -360,6 +363,9 @@ html, body {
 .led.ready { background: var(--success); }
 .led.busy { background: var(--active); }
 .led.lost { background: var(--error); }
+/* 목업 1m · HALTED 의 LED 는 빨강(#FF4D4D = --error). pose 유실과 색은 같지만
+   원인이 달라 클래스를 나눠 둔다 — 로그와 화면을 맞춰 볼 때 구분이 필요하다. */
+.led.halt { background: var(--error); }
 .trayexp { font: 500 10px var(--mono); color: var(--t5); cursor: pointer; }
 
 /* ══ E_STOP 프레임 · 오류 배너 ══════════════════════════════ */

@@ -405,16 +405,29 @@ class UiState:
                   for p in candidates[:4]],
             actions=[{"id": "cancel", "label": "명령 취소"}])
 
-    def raise_unparseable(self, reason: str, examples: list) -> None:
-        """E-402 · 대상·목적지를 못 뽑음 — 실행 금지, 예시를 보여준다."""
+    def raise_unparseable(self, reason: str, choices: list) -> None:
+        """E-402 · 대상을 못 뽑음 — 실행하지 않고 되묻는다.
+
+        목업 1j 의 제목이 그대로 "해석 보류 — **실패로 읽히지 않는** 되묻기"다.
+        그래서 문구를 사과나 오류로 쓰지 않는다. 예전에는 "명령을 이해하지
+        못했습니다"였는데, 그건 로봇이 잘못했다는 말로 읽혀서 사람이 다시
+        말하기를 주저하게 만든다 — 목업이 피하려던 바로 그 상태다.
+
+        choices 는 지금 화면에 보이는 기물 라벨이다. 예시 문장이 아니라
+        **실제로 있는 것**을 내놓아야 눌러서 바로 고를 수 있다."""
+        rows = [{"id": c, "label": PIECE_KO.get(c, c), "meta": c, "act": "card_row"}
+                for c in choices[:3]]
+        # 목업 1j 의 마지막 칩. 지시를 안 주면 FSM 은 원래 가장 가까운 기물을
+        # 스스로 고르므로, 이건 "카드만 닫으면 되는" 선택지다.
+        rows.append({"id": "__nearest", "label": "가장 가까운 것", "meta": "", "act": "card_row"})
         self.show_card(
             code="E-402 UNPARSEABLE", next_state="→ 대상 선택 대기",
-            tone="caution", icon="!",
-            title="명령을 이해하지 못했습니다",
-            detail=reason or "대상이 분명하지 않아 실행하지 않습니다. 아래처럼 말해주세요.",
-            rows=[{"id": e, "label": f"“{e}”", "meta": "", "act": "card_row"} for e in examples[:3]],
-            actions=[{"id": "again", "label": "다시 말하기", "primary": True},
-                     {"id": "cancel", "label": "취소"}])
+            tone="caution", icon="?",
+            title="조금만 더 알려주시면 바로 움직일게요",
+            detail=(reason or "어떤 기물을 말씀하시는 걸까요? "
+                              "아래에서 고르셔도 되고, 다시 말씀하셔도 됩니다."),
+            rows=rows,
+            actions=[{"id": "again", "label": "다시 말씀해 주세요", "primary": True}])
 
     def raise_target_not_found(self, candidates: list) -> None:
         """E-201 · 탐색했는데 대상을 못 찾음 — 반드시 정지."""
@@ -643,7 +656,10 @@ class UiState:
                 "manual": manual_mode,
                 # 자율 주행 중에만 AUTO 점등. 사람이 개입하면 소등 — 화면 주석 Stage 3.
                 "auto": (not manual_mode) and running and not halted,
-                "led": ("lost" if not pose.ok else
+                # 목업 1m — 정지 중에는 무조건 빨강이 먼저다. pose 나 진행 상태보다
+                # "지금 멎어 있다"가 우선해서 읽혀야 한다.
+                "led": ("halt" if halted else
+                        "lost" if not pose.ok else
                         "busy" if running else
                         "ready" if fsm.ready_to_advance else ""),
                 "estop_armed": halted,
@@ -749,8 +765,11 @@ class UiState:
             "yaw": f"{pose.yaw_deg:.1f}" if pose.ok else None,
             "cmd": fsm.last_cmd,
             "target": fsm.target_label,
-            "grip": ("closed" if fsm.state in (State.CARRY_TO_DEST, State.FACE_BOX)
-                     else "open" if fsm.state is not State.GRASP else "closing"),
+            # 운반 구간은 전부 쥐고 있다 — NUDGE_BOX(상자 앞 마지막 전진)도
+            # 포함이다. PLACE_BACKOFF·RETURN_HOME 은 이미 놓은 뒤라 open.
+            "grip": ("closed" if fsm.state in (State.CARRY_TO_DEST, State.FACE_BOX,
+                                               State.NUDGE_BOX)
+                     else "closing" if fsm.state is State.GRASP else "open"),
             "veh": battery_veh, "arm": battery_arm,
         }
 
@@ -805,7 +824,9 @@ class UiState:
                 return "IDLE", "대기", "IDLE", "기물 없음", "accent"
             return "SCANNING", "대상 탐색 중", "SCANNING", "기물 탐색", "accent"
         if st is State.APPROACH_PIECE:
-            return ("APPROACH_PIECE", f"{josa(label_ko, 'euro')} 접근 중",
+            # 목업 1d 는 "타깃으로 접근 중" — 기물 이름을 넣지 않는다. 이름은
+            # 바로 위 명령문 줄과 1c 대상 요약이 이미 말해 준다.
+            return ("APPROACH_PIECE", "타깃으로 접근 중",
                     "APPROACH_PIECE", "1 / 4 · 접근", "active")
         if st is State.GRASP:
             return "GRASP", "집는 중", "GRASP", "2 / 4 · 집기", "active"
@@ -897,7 +918,12 @@ class UiState:
                        else mcfg.PLACE_TRIGGER_DIST_M)
             self._last_path = path
             self._last_path_at = now
-            metric = f"남은 {self._smooth_dist(dist_goal):.2f} m"
+            # 목업 1d — "남은 거리 0.21 m". 접근 구간에서는 거리를 보여준다.
+            # 운반 구간(1f)은 아래에서 "무엇을 싣고 있는가"로 바꿔 단다.
+            if fsm.state is State.CARRY_TO_DEST and fsm.target_label:
+                metric = f"{fsm.target_label} 적재됨"
+            else:
+                metric = f"남은 거리 {self._smooth_dist(dist_goal):.2f} m"
             span = max(1e-6, self._leg_span(dist_goal, trigger))
             frac = max(0.0, min(1.0, 1.0 - (dist_goal - trigger) / span))
             # 한 구간 안에서 진행률 막대는 뒤로 가지 않는다. 로봇이 회전하느라
@@ -920,10 +946,15 @@ class UiState:
             frac = 1.0
         elif fsm.state is State.GRASP:
             frac = min(0.95, phase_t / GRASP_EXPECT_S)
-            metric = f"그립 {int(frac * 100)}%"
+            metric = f"그립 닫힘 {int(frac * 100)}%"      # 목업 1e
         elif fsm.state is State.PLACE:
             frac = min(0.95, phase_t / PLACE_EXPECT_S)
-            metric = f"그립 {int((1 - frac) * 100)}%"
+            # 목업 1g — "오른쪽 박스 · 1.42, 1.62 m". 그립 % 대신 어디에 넣는
+            # 중인지를 좌표까지 적는다(실기 상자 이름은 장난감/체스다).
+            box = mcfg.PIECE_DEST_BOX.get(fsm.target_label or "")
+            dest = fsm.dest_xy if getattr(fsm, "dest_xy", None) else None
+            metric = (f"{BOX_KO.get(box, '박스')} · {dest[0]:.2f}, {dest[1]:.2f} m"
+                      if dest else BOX_KO.get(box, "박스"))
         elif fsm.state is State.DONE:
             metric = f"{len(self.done_ids)}개 완료"
 

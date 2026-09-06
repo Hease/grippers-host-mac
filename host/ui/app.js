@@ -311,7 +311,17 @@ function renderTray(s) {
   // 자율 주행 중에만 주황 점등. 사람이 개입한 동안은 소등 — 화면 주석 Stage 3.
   mode.classList.toggle("auto", !!t.auto);
   $("nextBtn").classList.toggle("go", !!t.manual);
-  $("estop").classList.toggle("armed", !!t.estop_armed);
+
+  // 목업 1m · 정지 중에는 트레이 구성 자체가 바뀐다.
+  const halted = !!t.estop_armed;
+  $("estop").classList.toggle("armed", halted);
+  $("estopLabel").textContent = halted ? "정지됨 · 해제" : "비상 정지";
+  $("haltNote").classList.toggle("hide", !halted);
+  $("trayGrow").classList.toggle("hide", halted);   // 빨간 한 줄이 그 자리를 대신 민다
+  // Prev/Next 는 정지 중에 숨긴다 — 구동이 멎은 상태에서 단계를 넘기는 버튼이
+  // 눌리는 자리에 남아 있으면, 눌러도 아무 일이 안 일어나는 것이 고장으로 읽힌다.
+  $("prevBtn").classList.toggle("hide", halted);
+  $("nextBtn").classList.toggle("hide", halted);
   $("led").className = "led " + (t.led || "");
 }
 

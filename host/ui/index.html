@@ -71,7 +71,11 @@ window.addEventListener("unhandledrejection", function (e) {
         </div>
         <div class="wave" id="wave"></div>
         <div class="partial" id="partialText"></div>
-        <div class="listenhint" id="listenHint">듣고 있습니다 · 말이 끝나면 자동으로 전송돼요</div>
+        <!-- 목업 1i 는 "자동으로 전송돼요"인데 이 구현은 자동 전송을 하지 않는다.
+           인식 결과를 보여주고 사람이 확인한 뒤 보낸다(오인식 안전장치, DEMO_UI.md).
+           실제 문구는 ui_state 가 매 프레임 덮어쓰지만, 창이 뜨는 첫 프레임에
+           지키지도 못할 약속이 잠깐 보이면 안 되므로 정적 문구도 맞춰 둔다. -->
+        <div class="listenhint" id="listenHint">듣고 있습니다 · 말이 끝나면 자동으로 인식합니다</div>
       </div>
     </section>
 
@@ -231,8 +235,11 @@ window.addEventListener("unhandledrejection", function (e) {
 
     <!-- ══ 1m · 하단 운영 트레이 (모든 화면 고정) ═══════════ -->
     <div class="tray">
-      <div class="estop" id="estop"><span class="sq"></span>비상 정지</div>
-      <div class="traygrow"></div>
+      <div class="estop" id="estop"><span class="sq"></span><span id="estopLabel">비상 정지</span></div>
+      <!-- 목업 1m · HALTED: 정지 중에만 뜨는 빨간 한 줄. 버튼이 "정지됨 · 해제"로
+           바뀌는 것만으로는 지금 구동이 멎어 있다는 사실이 안 읽힌다. -->
+      <div class="haltnote hide" id="haltNote">모든 구동 중단됨</div>
+      <div class="traygrow" id="trayGrow"></div>
       <div class="traybtns">
         <span class="mono tb" id="modeBtn">AUTO</span>
         <span class="mono tb" id="resetBtn">Reset</span>
