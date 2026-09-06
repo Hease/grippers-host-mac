@@ -1,0 +1,382 @@
+/* 로봇 시연 UI — "로봇 시연 UI 목업.dc.html"(1a – 1m) 의 값 그대로.
+ *
+ * 좌표·크기·색은 전부 목업 아트보드에서 실측한 값이다. 목업이 절대 좌표가
+ * 아니라 세로 flex 배치라 여기서도 그렇게 짠다 — 화면마다 들어가는 블록이
+ * 달라서(대기/접수/실행/완료) 절대 y 로 고정하면 맞출 수가 없다.
+ *
+ * 스테이지는 432 x 768 논리 픽셀로 만들고 transform 으로 키운다. 1080 x 1920
+ * 에서는 정확히 2.5배(432 x 2.5 = 1080)라 목업 숫자를 그대로 쓸 수 있다.
+ */
+
+:root {
+  --bg: #06090F;
+  --frame: #0A0F18;
+  --raised: #111A27;          /* 입력 바 · 마이크 */
+  --sunken: #0E1622;          /* 접수 화면 에코 바 */
+  --sunken-2: #0C131E;        /* 실행 중 "명령 추가…" */
+  --card: #121A26;
+  --notice: #141B27;
+  --tray: #070A11;
+
+  --t1: #E7EDF7;   /* 본문 */
+  --t2: #8E9AAB;   /* 보조 */
+  --t3: #5C6B80;   /* 흐림 */
+  --t4: #4A5768;   /* 더 흐림 — 트레이 버튼·수치 라벨 */
+  --t5: #3A4757;   /* 최흐림 — 모노 라벨 */
+  --t6: #33404F;   /* READY / COMMAND 라벨 */
+  --quiet: #B8C4D6;           /* 실행 중 명령문 */
+
+  --accent: #8B7BFF;
+  --accent-2: #B7ACFF;
+  --success: #3DE8B0;
+  --active: #FF6B4A;
+  --active-2: #FF8A6B;
+  --caution: #FFA53D;
+  --error: #FF4D4D;
+  --error-2: #FF6B6B;
+  --piece: #9AA7B8;
+
+  --hair: rgba(255, 255, 255, .06);
+  --hair-2: rgba(255, 255, 255, .08);
+  --hair-3: rgba(255, 255, 255, .16);
+
+  --t-fast: .25s cubic-bezier(.4, 0, .2, 1);
+  --t-base: .3s cubic-bezier(.4, 0, .2, 1);
+
+  --mono: 'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, monospace;
+  --sans: 'Nanum Gothic', 'Apple SD Gothic Neo', 'Malgun Gothic', system-ui, sans-serif;
+}
+
+* { box-sizing: border-box; -webkit-user-select: none; user-select: none; }
+html, body {
+  margin: 0; height: 100%; overflow: hidden; cursor: default;
+  background: var(--bg); font-family: var(--sans); -webkit-font-smoothing: antialiased;
+}
+#viewport { position: fixed; inset: 0; display: flex; align-items: center; justify-content: center; }
+#stage {
+  position: relative; width: 432px; height: 768px;
+  transform: scale(var(--k, 1)); transform-origin: center center;
+  background: var(--frame); border-radius: 20px; overflow: hidden;
+  color: var(--t1); display: flex; flex-direction: column;
+}
+.mono { font-family: var(--mono); }
+.hide { display: none !important; }
+
+/* 화면 하나가 트레이 위 전체를 차지한다. 동시에 하나만 보인다. */
+.screen {
+  position: absolute; left: 0; right: 0; top: 0; bottom: 50px;
+  display: flex; flex-direction: column;
+  animation: rise .3s cubic-bezier(.4, 0, .2, 1);
+}
+@keyframes rise { from { opacity: 0; transform: translateY(14px) } to { opacity: 1; transform: none } }
+
+/* ══ 공통 조각 ══════════════════════════════════════════════ */
+.label { font: 700 10px var(--mono); letter-spacing: .2em; color: var(--t6); }
+.rule { height: 1px; background: var(--hair-2); }
+.mapslot {
+  flex: 1; padding: 0 20px; display: flex; align-items: flex-start;
+  transition: opacity .35s ease-in-out, transform .35s ease-in-out;
+  transform-origin: center top;
+}
+/* 차단 카드가 뜨면 맵은 55% 로 흐리고 0.87 배로 줄인다 — 명세 §5 */
+.mapslot.dim { opacity: .55; transform: scale(.87); }
+.mapslot.faint.dim { opacity: .2; }
+.mapslot.faint { padding: 4px 20px 0; opacity: .3; }
+.mapslot.done { padding: 6px 46px 0; align-items: center; opacity: .42; }
+.mapbox { width: 392px; }
+.mapslot.done .mapbox { width: 340px; }
+.mapbox svg { display: block; width: 100%; height: auto; }
+
+.field {
+  /* min-width:0 이 없으면 <input> 의 고유 너비(기본 약 20자)가 flex 를 밀어내
+     입력 바가 프레임 밖으로 나가고 마이크 버튼이 잘린다. */
+  flex: 1; min-width: 0;
+  display: flex; align-items: center; gap: 2px;
+  background: var(--raised); border: 1.5px solid var(--hair-3);
+}
+.field.big { height: 74px; border-radius: 37px; padding: 0 26px; }
+.field.mid { height: 62px; border-radius: 31px; padding: 0 22px; }
+.field .ph { font-weight: 700; color: var(--t3); }
+.field.big .ph { font-size: 21px; }
+.field.mid .ph { font-size: 18px; }
+
+/* 진짜 <input> — 테두리·배경은 감싸는 .field 가 갖고, 글자만 여기서 낸다.
+   커서는 브라우저 것을 쓴다(예전엔 깜빡이는 막대를 흉내로 그렸다). */
+.inp {
+  flex: 1; min-width: 0; border: 0; outline: 0; background: transparent;
+  font-family: var(--sans); font-weight: 700; color: var(--t1);
+  caret-color: var(--accent); -webkit-user-select: text; user-select: text;
+}
+.inp::placeholder { color: var(--t3); opacity: 1; }
+.field.big .inp { font-size: 21px; }
+.field.mid .inp { font-size: 18px; }
+.addfield.inp { font-weight: 400; font-size: 13px; color: #8E9AAB; }
+.addfield.inp::placeholder { color: #2E3A49; }
+.caret { display: inline-block; width: 2px; background: var(--accent); margin-left: 4px;
+         animation: blink 1.1s step-end infinite; }
+.field.big .caret { height: 24px; }
+.field.mid .caret { height: 20px; }
+
+.mic {
+  position: relative; flex: none; border-radius: 50%;
+  display: flex; align-items: center; justify-content: center;
+  background: var(--raised); cursor: pointer;
+}
+.mic.big { width: 74px; height: 74px; border: 1.5px solid rgba(139, 123, 255, .5); }
+.mic.mid { width: 62px; height: 62px; border: 1.5px solid rgba(139, 123, 255, .45); }
+.mic.sm  { width: 46px; height: 46px; background: var(--sunken); border: 1px solid var(--hair-2); }
+/* 인식이 확정되면 같은 자리가 전송 버튼이 된다 */
+.mic.sm.send { background: var(--accent); border-color: var(--accent); }
+.mic .halo {
+  position: absolute; inset: 0; border-radius: 50%;
+  background: var(--accent); opacity: .5;
+  animation: halo 2.4s ease-out infinite;
+}
+.mic.rec { border-color: rgba(255, 77, 77, .7); }
+.mic.rec .halo { background: var(--error); animation-duration: 1.1s; }
+.mic.rec svg { stroke: var(--error); }
+.inputrow { display: flex; gap: 12px; align-items: center; min-width: 0; }
+.inputrow.next { padding: 0 26px 22px; }
+
+.tag {
+  height: 24px; padding: 0 9px; border-radius: 5px; cursor: pointer;
+  background: rgba(255, 255, 255, .04); color: var(--t4);
+  font: 500 10px/24px var(--mono);
+}
+.tag.on { height: 22px; padding: 0 8px; line-height: 22px;
+          background: rgba(255, 255, 255, .06); color: var(--t2); }
+
+/* ══ 1a · 대기 ══════════════════════════════════════════════ */
+.idlebody { flex: 1; display: flex; flex-direction: column; justify-content: center; padding: 0 30px; }
+.idlebody .label { margin-bottom: 26px; }
+.hints { margin-top: 22px; padding-left: 26px; display: flex; flex-direction: column; gap: 7px; }
+.hints > div { font: 400 14px/1.4 var(--sans); transition: color .3s, opacity .3s; }
+.hints .h1 { color: #66768C; }
+.hints .h2 { color: #2E3A49; }
+.hints .h3 { color: #222C39; }
+.dots { display: flex; gap: 5px; margin-top: 8px; }
+.dots i { width: 6px; height: 2px; border-radius: 1px; background: #26313E; transition: width .3s, background .3s; }
+.dots i.on { width: 16px; background: var(--accent); }
+
+/* ══ 1i · 음성 입력 중 ══════════════════════════════════════ */
+.listenbody {
+  flex: 1; display: flex; flex-direction: column;
+  justify-content: center; align-items: center; padding: 0 34px;
+}
+.biggie { position: relative; width: 96px; height: 96px; margin-bottom: 34px; }
+.halo.big { position: absolute; inset: 0; border-radius: 50%;
+            background: var(--accent); opacity: .45; animation: halo 2s ease-out infinite; }
+.orb {
+  position: relative; width: 96px; height: 96px; border-radius: 50%;
+  background: var(--accent); display: flex; align-items: center; justify-content: center;
+}
+.wave { display: flex; align-items: flex-end; gap: 4px; height: 40px; margin-bottom: 26px; }
+.wave i { width: 4px; border-radius: 2px; background: var(--accent);
+          transition: height .09s linear, opacity .09s linear; }
+.partial { font-size: 22px; font-weight: 800; line-height: 1.4; text-align: center; text-wrap: pretty; }
+.partial u { color: var(--t6); text-decoration: none; }
+.listenhint { margin-top: 16px; font: 400 12px var(--sans); color: var(--t4); text-align: center; }
+
+/* ══ 1b · 접수 · 해석 ═══════════════════════════════════════ */
+.cmdhead { padding: 30px 26px 16px; }
+.cmdhead .label { margin-bottom: 12px; }
+.cmdtext { font-size: 25px; font-weight: 800; line-height: 1.36; letter-spacing: -.01em; text-wrap: pretty; }
+.cmdhead .rule { margin: 18px 0 14px; }
+.interp { display: flex; align-items: center; gap: 9px; }
+.idot { width: 7px; height: 7px; border-radius: 50%; background: var(--accent);
+        animation: blink 1s step-end infinite; }
+.itext { font: 400 14px var(--sans); color: var(--t2); }
+.icode { font: 400 11px var(--mono); color: var(--t5); margin-left: auto; }
+.echorow { padding: 0 20px 12px; display: flex; gap: 8px; align-items: center; }
+.echo.ready { color: var(--t2); border-color: rgba(139, 123, 255, .35); }
+.echo {
+  flex: 1; height: 46px; border-radius: 23px; padding: 0 18px;
+  display: flex; align-items: center;
+  background: var(--sunken); border: 1px solid var(--hair-2);
+  color: var(--t6); font-size: 14px;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+
+/* ══ 1c – 1g · 실행 ═════════════════════════════════════════ */
+.runhead { padding: 26px 26px 12px; }
+.quote { font-size: 21px; font-weight: 800; line-height: 1.35; color: var(--quiet); text-wrap: pretty; }
+.runhead .rule { margin: 14px 0 0; }
+
+.targetrow { padding: 8px 26px 14px; display: flex; align-items: center; gap: 12px; }
+.tname { font: 800 17px var(--sans); color: var(--success); }
+.treason { font: 400 11.5px var(--sans); color: var(--t3); margin-top: 2px; }
+.tdist { margin-left: auto; text-align: right; }
+.dlabel { font: 500 10px var(--mono); color: var(--t5); letter-spacing: .1em; }
+.dval { font: 500 14px var(--mono); color: var(--t2); }
+
+.statusblock { padding: 6px 26px 0; }
+.sbrow1 { display: flex; align-items: center; gap: 10px; margin-bottom: 9px; }
+.sdot { width: 8px; height: 8px; border-radius: 50%; background: var(--active); transition: background var(--t-base); }
+.sko { font: 800 16px var(--sans); }
+.sen { font: 500 10.5px var(--mono); color: var(--t4); margin-left: auto; }
+.pbar { height: 3px; border-radius: 2px; background: rgba(255, 255, 255, .07); overflow: hidden; }
+.pfill { height: 100%; width: 0; border-radius: 2px; background: var(--active);
+         transition: width .2s linear, background var(--t-base); }
+.sbrow2 { display: flex; justify-content: space-between; align-items: center; margin-top: 7px; }
+.step { font: 400 11px var(--sans); color: var(--t3); }
+.metric { display: flex; align-items: center; gap: 6px; font: 500 11px var(--mono); color: var(--t3); }
+.gripicon { flex: none; }
+
+.addrow { padding: 0 20px 12px; display: flex; gap: 8px; align-items: center; min-width: 0; }
+.addfield {
+  flex: 1; height: 42px; border-radius: 21px; padding: 0 18px;
+  background: var(--sunken-2); border: 1px solid rgba(255, 255, 255, .07);
+  color: #2E3A49; font-size: 13px;
+}
+.detailrow { padding: 14px 26px 12px; display: flex; align-items: center; gap: 8px; }
+.dtitle { font: 500 10px var(--mono); color: var(--t5); letter-spacing: .1em; }
+.dline { flex: 1; height: 1px; background: var(--hair); }
+
+/* ══ 1h · 완료 ══════════════════════════════════════════════ */
+.donehead { padding: 28px 26px 6px; display: flex; align-items: flex-start; gap: 12px; }
+.donehead svg { margin-top: 3px; flex: none; }
+.donetitle { font-size: 23px; font-weight: 800; line-height: 1.38; letter-spacing: -.01em; text-wrap: pretty; }
+.donesub { padding: 12px 26px 0; font: 400 12px var(--sans); color: var(--t4); }
+
+/* ══ 1k · 1l · 접이식 패널 ══════════════════════════════════ */
+.panel {
+  position: absolute; left: 0; right: 0; bottom: 50px; z-index: 20;
+  padding: 12px 26px 16px;
+  background: var(--frame); border-top: 1px solid var(--hair);
+  box-shadow: 0 -18px 40px rgba(6, 9, 15, .7);
+  animation: rise .25s cubic-bezier(.4, 0, .2, 1);
+}
+.panelhead { display: flex; align-items: center; gap: 8px; margin-bottom: 14px; }
+.grid3 { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 12px 10px; font-family: var(--mono); }
+.grid3.legend { gap: 16px 8px; font-family: var(--sans); }
+.dk { font-size: 9px; color: var(--t5); letter-spacing: .08em; }
+.dv { font-size: 14px; color: #C9D4E4; margin-top: 2px; }
+.dv u { font-size: 9px; color: var(--t4); text-decoration: none; }
+.dv.accent { color: var(--accent); }
+.dv.ok { color: var(--success); }
+.gline { height: 1px; background: var(--hair); margin: 14px 0; }
+.batts { display: flex; gap: 18px; align-items: center; }
+.batt { display: flex; align-items: center; gap: 7px; }
+.bk { font-size: 9px; color: var(--t5); letter-spacing: .08em; }
+.bbar { width: 38px; height: 5px; border-radius: 3px; background: rgba(255, 255, 255, .07); overflow: hidden; }
+.bbar i { display: block; height: 100%; width: 0; border-radius: 3px; background: var(--success); }
+.bv { font-size: 10px; color: var(--t2); }
+.lgi { display: flex; align-items: center; gap: 9px; }
+.lgn { font: 400 12px var(--sans); color: var(--t2); }
+.lgc { font: 400 9.5px var(--mono); color: var(--t5); }
+
+/* ══ 알림 배너 · 차단 카드 ══════════════════════════════════ */
+.toast {
+  position: absolute; left: 20px; right: 20px; bottom: 60px; z-index: 30;
+  display: flex; align-items: center; gap: 9px;
+  height: 42px; padding: 0 14px; border-radius: 14px;
+  background: var(--notice); border: 1px solid var(--toast-line, rgba(255, 107, 74, .32));
+  box-shadow: 0 12px 30px rgba(6, 9, 15, .55);
+  animation: rise .25s cubic-bezier(.4, 0, .2, 1);
+}
+.tdot { width: 6px; height: 6px; border-radius: 50%; flex: none; background: var(--toast-color, var(--active)); }
+.ttext { font: 700 12.5px var(--sans); color: #C6D2E2; }
+.ttag { margin-left: auto; font: 700 9.5px var(--mono); letter-spacing: .06em;
+        padding: 3px 6px; border-radius: 6px;
+        background: rgba(255, 255, 255, .05); color: var(--toast-color, var(--active)); }
+
+.cardov {
+  position: absolute; left: 18px; right: 18px; bottom: 58px; z-index: 40;
+  padding: 18px 18px 15px; border-radius: 18px;
+  background: var(--card); border: 1px solid var(--card-line, rgba(255, 77, 77, .34));
+  box-shadow: 0 -18px 40px rgba(6, 9, 15, .7);
+  animation: rise .3s cubic-bezier(.4, 0, .2, 1);
+}
+.cardicon {
+  width: 34px; height: 34px; border-radius: 50%; margin-bottom: 12px;
+  display: flex; align-items: center; justify-content: center;
+  font-size: 18px; font-weight: 800;
+  background: var(--card-soft, rgba(255, 77, 77, .14)); color: var(--card-color, var(--error));
+}
+.cardtitle { font: 800 19px var(--sans); letter-spacing: -.01em; line-height: 1.35; }
+.carddetail { margin-top: 8px; font: 400 13px/1.65 var(--sans); color: var(--t2); }
+.cardrows { display: flex; flex-direction: column; gap: 6px; margin-top: 14px; }
+.cr {
+  display: flex; align-items: center; gap: 10px; min-height: 44px; padding: 10px 13px;
+  border-radius: 11px; cursor: pointer; color: #D4DEEC;
+  background: rgba(255, 255, 255, .04); border: 1px solid rgba(255, 255, 255, .09);
+}
+.cr .l { font: 700 13px/1.45 var(--sans); }
+.cr .m { margin-left: auto; font: 400 10px var(--mono); color: var(--t4); white-space: nowrap; }
+/* W-401 후보 시트의 신뢰도 바 — 명세 3 x 52 */
+.cr .cbar { width: 52px; height: 3px; border-radius: 2px; flex: none;
+            background: rgba(255, 255, 255, .08); overflow: hidden; }
+.cr .cfill { display: block; height: 100%; border-radius: 2px; background: var(--caution); }
+.cardactions { display: flex; gap: 8px; margin-top: 14px; }
+.ca {
+  height: 44px; padding: 0 18px; border-radius: 22px; cursor: pointer;
+  display: flex; align-items: center; justify-content: center;
+  background: rgba(255, 255, 255, .05); border: 1px solid rgba(255, 255, 255, .1);
+  color: #A9B6C8; font: 700 12.5px var(--sans);
+}
+.ca.primary {
+  flex: 1; background: var(--card-color, var(--error)); border-color: var(--card-color, var(--error));
+  color: var(--frame); font: 800 14px var(--sans);
+}
+.cardfoot {
+  display: flex; gap: 10px; margin-top: 13px; padding-top: 11px;
+  border-top: 1px solid var(--hair);
+  font: 500 9.5px var(--mono); letter-spacing: .06em; color: var(--t5);
+}
+.cardfoot span:last-child { margin-left: auto; }
+
+/* ══ 1m · 하단 운영 트레이 ══════════════════════════════════ */
+.tray {
+  position: absolute; left: 0; right: 0; bottom: 0; height: 50px; z-index: 50;
+  display: flex; align-items: center; gap: 7px; padding: 11px 15px;
+  background: var(--tray); border-top: 1px solid var(--hair);
+}
+.traygrow { flex: 1; }
+/* 비상 정지는 접거나 숨기지 않고 항상 같은 자리(좌측 첫 칸)에 둔다 — 목업 1m. */
+.estop {
+  display: flex; align-items: center; gap: 6px;
+  height: 28px; padding: 0 11px; border-radius: 6px; cursor: pointer;
+  border: 1px solid rgba(255, 77, 77, .4); color: var(--error-2);
+  font: 700 10.5px var(--sans); transition: background var(--t-fast), color var(--t-fast);
+}
+.estop .sq { width: 7px; height: 7px; border-radius: 1px; background: var(--error); }
+.estop.armed { background: var(--error); border-color: var(--error); color: #fff; }
+.estop.armed .sq { background: #fff; }
+.traybtns { display: flex; gap: 5px; }
+.tb {
+  height: 28px; padding: 0 10px; border-radius: 6px; cursor: pointer;
+  background: rgba(255, 255, 255, .03); color: var(--t4);
+  font: 500 10.5px/28px var(--mono);
+  transition: background var(--t-fast), color var(--t-fast);
+}
+/* 진행 동작(Next)만 채도를 갖는다 — 목업 1m */
+.tb.go { background: rgba(255, 255, 255, .07); color: var(--t2); }
+/* 자율 주행 중에는 AUTO 가 주황으로 점등, 사람이 개입하면 소등 — 화면 주석 Stage 3 */
+.tb.auto { background: rgba(255, 107, 74, .16); color: var(--active-2); }
+/* Reset 은 2단 확인 */
+.tb.confirm { background: rgba(255, 77, 77, .16); color: var(--error-2); }
+.led { width: 8px; height: 8px; border-radius: 50%; margin-left: 4px; flex: none;
+       background: var(--t5); transition: background var(--t-base); }
+.led.ready { background: var(--success); }
+.led.busy { background: var(--active); }
+.led.lost { background: var(--error); }
+.trayexp { font: 500 10px var(--mono); color: var(--t5); cursor: pointer; }
+
+/* ══ E_STOP 프레임 · 오류 배너 ══════════════════════════════ */
+.estopframe {
+  position: absolute; inset: 0; border-radius: 20px; border: 2px solid var(--error);
+  pointer-events: none; opacity: 0; z-index: 60;
+}
+.estopframe.on { animation: estopFrame 1.1s ease-in-out infinite; }
+.booterr {
+  position: absolute; left: 14px; right: 14px; bottom: 58px; z-index: 70;
+  padding: 10px 12px; border-radius: 10px;
+  background: rgba(255, 77, 77, .12); border: 1px solid rgba(255, 77, 77, .45);
+  color: #FF9B9B; font: 400 10px/1.5 var(--mono); word-break: break-all;
+}
+
+@keyframes blink { 0%, 49% { opacity: 1 } 50%, 100% { opacity: 0 } }
+@keyframes halo { 0% { transform: scale(1); opacity: .5 } 100% { transform: scale(1.8); opacity: 0 } }
+@keyframes estopFrame { 0%, 100% { opacity: .25 } 50% { opacity: .8 } }
+@keyframes ringPulse { 0%, 100% { opacity: .9 } 50% { opacity: .55 } }
+@keyframes ringPulse2 { 0%, 100% { opacity: .1 } 50% { opacity: .4 } }

@@ -9,3 +9,6 @@ dataset/
 
 host/logs/
 *.jsonl
+
+# UI 작업용 (Hease) — 가상환경은 기계마다 다시 만든다
+.venv/
