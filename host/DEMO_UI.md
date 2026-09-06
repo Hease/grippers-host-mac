@@ -1,0 +1,94 @@
+# 시연 UI (세로 1080×1920) — 붙이는 방법과 아직 안 된 것
+
+관객용 세로 화면이다. 팀원이 쓰는 `live_map.py`(가로 matplotlib 지도)를
+대체하지 않고 **따로 뜬다** — 둘 중 하나만 고른다.
+
+## 이 저장소에서 이 UI 가 건드리는 것 — 없다
+
+`mission.py` · `navigator.py` · `vehicle_link.py` · `mission_config.py` ·
+`run_sim.py` · `run_mission.py` 는 **한 줄도 안 고쳤다**(사용자 지시,
+2026-09-07). 전부 읽기만 한다.
+
+| 새로 추가한 파일 | 하는 일 |
+|---|---|
+| `ui/` | 화면 자체 (HTML/CSS/JS) |
+| `ui_state.py` | 미션 상태 → 화면 dict. 한국어 문구·예외 코드 전부 여기 |
+| `ui_bridge.py` | pywebview 창 + JS 다리 |
+| `voice_input.py` | 로컬 Whisper 음성 입력 (선택) |
+| `run_sim_ui.py` | 카메라·모델·차량 없이 이 UI 만 돌리는 진입점 |
+
+팀원 코드에서 읽어 오는 이름은 **`ui_state.py` 맨 위 "실기 FSM 결합부"
+한 블록**에 모여 있다. 그쪽이 바뀌어 화면이 깨지면 고칠 곳은 거기 하나다.
+
+## 실행
+
+```
+cd host
+../.venv/bin/python run_sim_ui.py              # 차량 없이 (지금 가능)
+../.venv/bin/python run_sim_ui.py --fullscreen # 세로 모니터 전체화면
+```
+
+세로 모니터가 없으면 창이 화면 높이에 맞춰 줄어든다(`ui/app.js` 의
+`fitStage`, 배율 = `min(너비/432, 높이/768)`). 1080×1920 에서는 정확히
+2.5배라 목업 치수가 그대로 나온다.
+
+## ⚠️ 비상 정지는 Pi 의 하드웨어 비상정지가 아니다
+
+화면의 "비상 정지"를 누르면 이 UI 는 **`fsm.step()` 을 건너뛰고 차량에
+정지 명령만 계속 보낸다.** 그것뿐이다.
+
+이렇게 만든 이유는 **Host 에 비상정지 경로가 아예 없기 때문**이다:
+
+- `mission.py` 에 `request_halt()` 도 `halted` 도 없다
+- `vehicle_link._STATE_TO_PI` 에 `ESTOP` 항목이 없다 — Host 가
+  `MissionState.ESTOP` 을 보낸 적이 한 번도 없다는 뜻이다
+  (`host/HANDOFF.md` §4 "ESTOP 경로 — Host 에 비상정지가 없다" 그대로다)
+
+그래서 지금 이 버튼이 하는 일은 "정지 명령을 계속 보낸다"이고, **링크가
+끊기면 아무 일도 안 일어난다.** Pi 쪽에는 `/mission/emergency_stop`
+ROS 토픽과 자체 워치독이 따로 있는데 이 버튼은 그것을 건드리지 않는다.
+
+**시연 전에 팀과 정할 것.** 화면에 비상정지 버튼이 있는데 실제로는 소프트
+정지라는 사실을 모르는 사람이 그 버튼을 누르는 상황이 가장 위험하다.
+
+## 명세와 실기가 다른 곳 — E-314 (파지 실패)
+
+명세는 "3회 연속 실패하면 정지하고 사람의 선택을 기다린다"였다. 실기
+FSM 은 **멈추지 않는다** — `_skip_target()` 으로 그 기물을 `skipped` 에
+넣고 다음 기물로 넘어간다. 그래서 화면을 막는 카드 대신 알림 배너로
+바꿨다. 카드를 띄우면 로봇은 계속 움직이는데 화면만 멈췄다고 말하게 된다.
+
+## 화면이 쓰는 실기 값 (지어내지 않는다)
+
+| 화면에 그리는 것 | 출처 |
+|---|---|
+| 회피 링 반경 | `mcfg.ROBOT_RADIUS_PIECE_M` (0.08) + `PIECE_OBSTACLE_RADIUS_M` |
+| 계획 경로 | `fsm.nav_path` (= `GridPathPlanner.last_path`) — 다시 계산하지 않는다 |
+| 상자·마커·작업영역 | `aruco/config.py` |
+| 파지 실패 허용 횟수 | `mcfg.GRASP_FAIL_MAX_RETRIES` |
+
+## 측정 (2026-09-07, 이 맥 · M2)
+
+| 항목 | 결과 |
+|---|---|
+| 12개 상태 문구 | 전부 매핑됨 |
+| 가상 차량 완주 | 기물 4개 집기→운반→투하, `build()` 오류 0건 |
+| `build()` 최대 소요 | **16 ms** (팀 실측 렌더 예산은 사이클 143ms 중 화면 90ms) |
+| 비상 정지 → 정지 해제 | 실제 클릭으로 확인 — 정지·복귀 모두 정상 |
+
+## 아직 안 한 것
+
+- `run_mission.py` 연결 (실기 카메라 + 차량). 지금은 시뮬레이터만
+- 화면 push 비용 측정 — 위 16ms 는 상태 생성만이고 창에 밀어 넣는
+  비용은 아직 안 쟀다. 워치독 여유(현재 2.1배)에 영향을 준다
+- 음성 입력(`voice_input.py`)은 `run_sim_ui.py` 에 안 물려 있다
+- `ui/mock.js`(실물 없이 보는 목업 재생)는 옛 상태 이름을 쓴다
+
+## 팀원에게 전달할 것 (이 UI 와 무관한 발견)
+
+1. `domain/ports/baseline_ports.py` 가 Pi 저장소 사본과 어긋난다
+   (`tools/check_domain_sync.py` 실패). **주석만 다르고 코드는 토큰 318개가
+   완전히 동일** — 기능 문제는 없지만 검사가 계속 빨간불이다.
+2. `run_sim.py` 가 투하를 `PLACE → SEARCH_TARGET` 전이로 잡는데 그 전이는
+   지금 없다(`PLACE → PLACE_BACKOFF → RETURN_HOME → SEARCH_TARGET`).
+   그래서 그쪽 시뮬레이터는 내려놓은 기물이 지도에서 안 사라진다.

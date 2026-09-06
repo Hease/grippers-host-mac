@@ -595,13 +595,15 @@ class UiState:
             "command": self._command_block(mode),
             # 1c – 1g · 실행
             "run": {
-                "quote": self._quoted(),
+                "quote": self._quoted(mode, pieces, manual_mode),
                 # Stage 2(대상 요약 줄) 와 Stage 3(상태·진행률) 은 배타적이다.
                 "mode": "target" if fsm.state is State.SEARCH_TARGET else "status",
             },
             "target": self._target_block(fsm, target_id, pieces, robot_xy),
             "status": {"ko": status_ko, "en": status_en, "step": step_ko,
                        "metric": metric, "progress": progress,
+                       # 그리퍼 아이콘 — 집거나 놓는 동작이 실제로 진행 중일 때만.
+                       # 재정렬(GRASP_ALIGN/REPLAN)은 바퀴가 움직이는 중이라 뺀다.
                        "grip": fsm.state in (State.GRASP, State.PLACE)},
             # 1h · 완료
             "done": self._done_block(fsm),
@@ -666,8 +668,17 @@ class UiState:
             return "idle"
         return "run"
 
-    def _quoted(self) -> str:
-        return f"“{self.command_text}”" if self.command_text else ""
+    def _quoted(self, mode="", pieces=None, manual_mode=False) -> str:
+        """실행 화면 맨 위 줄. 목업(1c–1g)은 여기에 사람이 말한 명령문이
+        큰 글씨로 남아 있는 것을 전제한다.
+
+        그런데 이 시스템은 명령 없이도 보이는 기물을 계속 옮긴다. 그때
+        이 줄을 비워 두면 목업의 가장 큰 글자 자리가 통째로 빈 채로 남아
+        화면이 고장 난 것처럼 보인다 — 지금 무엇을 기준으로 움직이는지
+        같은 자리에 적어 준다(따옴표는 안 씌운다. 사람이 한 말이 아니다)."""
+        if self.command_text:
+            return f"“{self.command_text}”"
+        return self._default_lead(mode, pieces or [], manual_mode)
 
     def _idle_block(self, pieces) -> dict:
         """1a — 빈 입력창이 주인공. 예시 문구 3줄이 2.4초마다 한 칸씩 밀린다."""
