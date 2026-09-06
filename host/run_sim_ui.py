@@ -40,7 +40,8 @@ sys.path.insert(0, str(Path(__file__).parent / "aruco"))
 import mission_config as mcfg
 from mission import MissionFSM, State, visible_labels
 from ui_bridge import DemoUI
-from ui_state import PIECE_KO, UiState
+from ui_state import PIECE_KO, UiState, resolve_label
+from ui_voice import Voice
 
 # 가상 차량·기물은 run_sim.py 것을 그대로 쓴다(베끼지 않는다).
 from run_sim import (SIM_HZ, SimRobot, SimVehicleLink, _copy_pieces,
@@ -74,6 +75,9 @@ def main() -> int:
     fsm = MissionFSM(manual_mode=args.step)
     link = SimVehicleLink(quiet=args.quiet)
     uistate = UiState()
+    voice = Voice(uistate)
+    if not voice.available:
+        print(f"[음성] 사용 불가 — {voice.error}")
 
     def _reset_all() -> None:
         robot.reset()
@@ -89,6 +93,12 @@ def main() -> int:
             # ⚠️ Pi 자체의 하드웨어 비상정지가 아니다 — 아래 루프가 fsm.step()
             # 을 건너뛰고 정지 명령만 계속 보내는 것이다. 차이는 README 참고.
             uistate.set_halted(True)
+        elif action == "card_action" and payload == "again":
+            # 목업 1j 의 "다시 말씀해 주세요" — 카드를 닫고 바로 녹음을 연다.
+            uistate.clear_card()
+            voice.toggle()
+        elif action == "card_action" and payload == "accept":
+            uistate.clear_card()       # W-401 · 불확실해도 그대로 쓰겠다
         elif action == "card_action" and payload in ("resume", "retry", "reset", "cancel"):
             uistate.set_halted(False)
             _reset_all()
@@ -118,25 +128,31 @@ def main() -> int:
                     lead="지금 바로 이동합니다." if applied
                          else "지금 옮기던 것을 마친 뒤 이동합니다.")
         elif action == "submit" and payload:
-            # 시뮬레이터에는 Claude 해석이 없다. 문장에서 라벨만 찾아 쓴다 —
-            # 못 찾으면 지어내지 않고 그대로 알린다.
-            text = str(payload).strip()
-            uistate.set_command(text)
-            hit = next((en for en, ko in PIECE_KO.items()
-                        if ko in text or en in text.lower()), None)
-            if hit and hit in visible_labels(pieces):
-                fsm.set_instruction(hit)
-                uistate.notify("OK", f"대상: {PIECE_KO[hit]}", "success")
-            else:
-                # 목업 1j — 지어내서 움직이지 않고 되묻는다. 지금 보이는
-                # 기물을 그대로 선택지로 낸다.
-                uistate.raise_unparseable(
-                    "어떤 기물을 말씀하시는 걸까요? 아래에서 고르셔도 되고, "
-                    "다시 말씀하셔도 됩니다.",
-                    sorted(visible_labels(pieces)))
+            _instruct(str(payload).strip())
+        elif action == "run":
+            # 음성 인식이 끝나 FINAL(실행 대기)인 상태에서 전송 버튼을 눌렀다.
+            text = uistate.pending_text
+            if text:
+                uistate.clear_pending()
+                _instruct(text)
         elif action == "mic":
-            uistate.notify("W-000", "시뮬레이터에는 음성 입력이 없습니다 — "
-                                    "입력창에 적어주세요", "caution")
+            voice.toggle()
+
+    def _instruct(text: str) -> None:
+        """문장 하나를 대상 지시로 바꾼다. 시뮬레이터에는 Claude 해석기가
+        없어서 문장 안의 기물 이름만 본다 — 못 찾으면 **지어내지 않고**
+        되묻는다(목업 1j)."""
+        uistate.set_command(text)
+        hit = resolve_label(text, visible_labels(pieces))
+        if hit:
+            fsm.set_instruction(hit)
+            uistate.clear_card()
+            uistate.notify("OK", f"대상: {PIECE_KO[hit]}", "success")
+        else:
+            uistate.raise_unparseable(
+                "어떤 기물을 말씀하시는 걸까요? 아래에서 고르셔도 되고, "
+                "다시 말씀하셔도 됩니다.",
+                sorted(visible_labels(pieces)))
 
     ui = DemoUI(on_event=_handle_ui_event, fullscreen=args.fullscreen,
                 debug=args.debug)
@@ -181,6 +197,7 @@ def main() -> int:
                 still = (State.SEARCH_TARGET, State.GRASP, State.PLACE)
                 robot.apply(link.last if fsm.state not in still else None, dt)
 
+            voice.poll()
             ui.push(uistate.build(pose, pieces, fsm,
                                   manual_mode=fsm.manual_mode,
                                   link_label="SIM (차량 미연결)"))

@@ -185,9 +185,11 @@ function route(from, to, avoid) {
 }
 
 // 안전거리 — 기물 회피반경 + 차량 반경 + 여유.
-// mission_config.py 의 PIECE_OBSTACLE_RADIUS_M + ROBOT_RADIUS_M + OBSTACLE_MARGIN_M
-// 과 같은 값이어야 한다. 저쪽을 바꾸면 여기도 같이 고칠 것(목업은 파이썬을 못 읽는다).
-const SAFE_M = 0.06 + 0.16 + 0.10;
+// mission_config.py 의 PIECE_OBSTACLE_RADIUS_M + ROBOT_RADIUS_PIECE_M
+// + OBSTACLE_MARGIN_M (2026-09-07 실기 값으로 맞춤 — 예전 값 0.32 는 옛
+// 스냅샷의 로봇 반경 0.16 을 쓰고 있었다). 실기는 차체 반경을 벽용 0.20 과
+// 기물용 0.08 로 나눠 갖고 있고, 여기 쓰는 것은 기물용이다.
+const SAFE_M = 0.06 + 0.08 + 0.05;
 const toward = (t, f, gap) => {
   const L = Math.max(1e-6, d2(t, f));
   return [t[0] + (f[0] - t[0]) / L * gap, t[1] + (f[1] - t[1]) / L * gap];
@@ -400,7 +402,8 @@ const MOCK = {
       setTimeout(() => { s.obstacle = null; }, 3500);
 
     } else if (code === "W-312") {                // 그립 놓침 — 비차단
-      s.notice = { code: "W-312", text: "그립 놓침 2 / 3 — 다시 잡아 봅니다",
+      // 3 이 아니라 5 다 — mission_config.GRASP_FAIL_MAX_RETRIES.
+      s.notice = { code: "W-312", text: "그립 놓침 2 / 5 — 다시 잡아 봅니다",
                    tone: "active", until: performance.now() + 3500 };
 
     } else if (code === "W-401") {                // 낮은 신뢰도 — 후보 시트
@@ -435,17 +438,13 @@ const MOCK = {
         actions: [{ id: "cancel", label: "명령 취소" }],
       };
 
-    } else if (code === "E-314") {                // 그립 3회 실패 — 차단
-      s.halted = true;
-      s.card = {
-        code: "E-314 GRASP_FAILED", next: "→ 사람 확인 대기", tone: "error", icon: "!",
-        title: `${josa(tp.ko)} 집지 못했습니다`,
-        detail: "3회 시도 모두 그립이 미끄러졌습니다. 기물이 기울었거나 파악 지점이 좁습니다. "
-              + "자세를 바로잡은 뒤 다시 시도하거나 이 기물을 건너뛰세요.",
-        rows: [],
-        actions: [{ id: "retry", label: "다시 시도", primary: true },
-                  { id: "skip", label: "건너뛰기" }, { id: "cancel", label: "작업 취소" }],
-      };
+    } else if (code === "E-314") {
+      // ⚠️ 예전에는 화면을 막는 카드였다. 실기 FSM 은 파지에 실패해도
+      // **멈추지 않는다** — _skip_target() 으로 그 기물을 건너뛰고 다음으로
+      // 간다. 카드를 띄우면 로봇은 계속 움직이는데 화면만 멈췄다고 말하게
+      // 되므로 알림 배너로 흘려보낸다(ui_state.py 의 같은 판단과 한 쌍이다).
+      s.notice = { code: "E-314", text: `${josa(tp.ko, "eun")} 건너뛰고 다음 기물로 갑니다`,
+                   tone: "caution", until: performance.now() + 4500 };
 
     } else if (code === "E-402") {                // 해석 실패 — 차단
       s.mode = "IDLE";
@@ -468,6 +467,52 @@ const MOCK = {
     const p = M_PIECES.find(x => x.id === id);
     s.target = id; s.dest = dest || p.dest;
     s.mode = "SCANNING"; s.phase_t = 0; s.legT = 0; s.leg = null;
+    s.alignAt = null;                 // GRASP_ALIGN 을 이번 기물에 넣을지 다시 뽑는다
+  },
+
+  /* ── 투하 전후의 짧은 구간들 ─────────────────────────────────
+     실기 FSM 이 2026-09 에 늘어난 부분이다. 셋 다 몇 cm 짜리 짧은 이동이라
+     따로 경로를 짜지 않고 직선 한 구간으로 둔다 — 목업 재생의 목적은
+     "화면이 이 단계를 어떻게 보여주는가"이지 주행 재현이 아니다. */
+
+  // 상자 앞에서 mission_config.BOX_NUDGE_M(0.05 m)만큼만 더 민다.
+  beginNudge() {
+    const s = this.s;
+    const sl = this.slot(s.dest, s.slotUse[s.dest]);
+    s.leg = [s.robot.slice(), toward(sl, s.robot, 0.13)];
+    s.legT = 0; s.legDur = 0.8;
+    s.mode = "NUDGE_BOX"; s.phase_t = 0;
+  },
+
+  // 투하 직후 후진. 그 자리에서 곧장 돌면 차체·팔이 상자를 스친다.
+  beginBackoff() {
+    const s = this.s;
+    const sl = this.slot(s.dest, s.slotUse[s.dest] - 1) || s.robot;
+    s.leg = [s.robot.slice(), toward(s.robot, sl, -0.12)];
+    s.legT = 0; s.legDur = 0.9;
+    s.mode = "PLACE_BACKOFF"; s.phase_t = 0;
+  },
+
+  // mission_config.DEFAULT_HOME_XY 로 복귀.
+  goHome() {
+    const s = this.s;
+    const r = route(s.robot.slice(), [0.90, 0.32], this.avoidFor(null));
+    s.leg = r.pts; s.legT = 0;
+    s.legDur = Math.max(1.2, plen(s.leg) / 0.45);
+    s.mode = "RETURN_HOME"; s.phase_t = 0;
+  },
+
+  // 복귀 완료 — 큐에 남은 게 있으면 다음 기물로, 없으면 완료 화면.
+  afterHome() {
+    const s = this.s;
+    s.leg = null;
+    s.qi++;
+    if (s.qi < s.queue.length) {
+      const nx = M_PIECES.find(x => x.id === s.queue[s.qi]);
+      this.begin(nx.id, nx.dest);
+    } else {
+      s.mode = "DONE"; s.phase_t = 0;
+    }
   },
 
   step(dt) {
@@ -494,7 +539,9 @@ const MOCK = {
         this.noteDetour(r, s.target);
         s.mode = "APPROACH_PIECE"; s.phase_t = 0;
       }
-    } else if (s.mode === "APPROACH_PIECE" || s.mode === "TRANSPORT") {
+    } else if (s.mode === "APPROACH_PIECE" || s.mode === "TRANSPORT"
+               || s.mode === "NUDGE_BOX" || s.mode === "PLACE_BACKOFF"
+               || s.mode === "RETURN_HOME") {
       const before = s.robot;
       s.legT += dt / s.legDur;
       const w = this.walk(s.leg, Math.min(1, s.legT));
@@ -502,10 +549,24 @@ const MOCK = {
       s.robot = w.pos; s.yaw = w.deg;
       if (s.legT >= 1) {
         if (s.mode === "APPROACH_PIECE") { s.mode = "GRASP"; s.phase_t = 0; }
-        else { s.mode = "RELEASE"; s.phase_t = 0; }
+        // 상자 앞 마지막 전진(BOX_NUDGE_M)이 끝나면 투하한다.
+        else if (s.mode === "NUDGE_BOX") { s.mode = "RELEASE"; s.phase_t = 0; }
+        // 투하 직후 후진이 끝나면 제자리로 돌아간다.
+        else if (s.mode === "PLACE_BACKOFF") { this.goHome(); }
+        else if (s.mode === "RETURN_HOME") { this.afterHome(); }
+        // TRANSPORT 끝 = 상자 앞 도착. 실기는 여기서 정렬(FACE_BOX) 후
+        // BOX_NUDGE_M 만큼만 더 민다(NUDGE_BOX).
+        else { this.beginNudge(); }
       }
     } else if (s.mode === "GRASP") {
       s.grip = Math.min(1, s.phase_t / 0.75);
+      // 실기는 차량이 "지금 자리에서는 못 집는다"(GRASP_BLOCKED)고 보고하면
+      // Host 가 한 걸음 다시 세운다(GRASP_ALIGN). 눈에 보이는 단계라 여기서도
+      // 가끔 넣는다 — 안 넣으면 목업 재생에서 이 화면을 볼 수가 없다.
+      if (s.alignAt == null) s.alignAt = Math.random() < 0.45 ? 0.35 : -1;
+      if (s.alignAt > 0 && s.grip >= s.alignAt) {
+        s.alignAt = -1; s.mode = "GRASP_ALIGN"; s.phase_t = 0;
+      }
       if (s.phase_t > 0.75) {
         s.held = s.target;
         const sl = this.slot(s.dest, s.slotUse[s.dest]);
@@ -522,16 +583,14 @@ const MOCK = {
         s.placed[s.target] = this.slot(s.dest, s.slotUse[s.dest]);
         s.slotUse[s.dest]++;
         s.done.push(s.target);
-        s.held = null; s.grip = 0; s.leg = null;
-        // 큐에 남은 게 있으면 완료로 가지 않고 다음 기물로 (명세 §7).
-        s.qi++;
-        if (s.qi < s.queue.length) {
-          const nx = M_PIECES.find(x => x.id === s.queue[s.qi]);
-          this.begin(nx.id, nx.dest);
-        } else {
-          s.mode = "DONE"; s.phase_t = 0;
-        }
+        s.held = null; s.grip = 0;
+        // 투하 직후 위치는 정면이 상자에 가장 가까운 자리다 — 실기에서는
+        // 곧장 돌면 차체나 팔이 상자를 스쳐서, 먼저 조금 물러난다.
+        this.beginBackoff();
       }
+    } else if (s.mode === "GRASP_ALIGN") {
+      // 한 걸음(3cm) 다시 세우고 GRASP 로 돌아간다.
+      if (s.phase_t > 0.6) { s.mode = "GRASP"; s.phase_t = 0.2; }
     } else if (s.mode === "DONE") {
       if (s.phase_t > 3.0) { s.mode = "IDLE"; s.target = null; s.words = 0; }
     }
@@ -560,7 +619,8 @@ const MOCK = {
   build() {
     const s = this.s;
     const tp = M_PIECES.find(p => p.id === s.target);
-    const run = ["APPROACH_PIECE", "GRASP", "TRANSPORT", "RELEASE"].includes(s.mode);
+    const run = ["APPROACH_PIECE", "GRASP", "GRASP_ALIGN", "TRANSPORT",
+                 "NUDGE_BOX", "RELEASE", "PLACE_BACKOFF"].includes(s.mode);
     const destKo = BOX_KO[s.dest] || "박스";
     const sentence = s.typed || M_COMMANDS[s.cmd].text;
     const words = sentence.split(" ");
@@ -576,10 +636,16 @@ const MOCK = {
       FINAL:          ["실행 대기", "READY", "전송 대기", "success"],
       SCANNING:       ["대상 탐색 중", "SCANNING", "기물 탐색", "accent"],
       PLANNING:       ["경로 계획", "PLANNING", "대상 확정", "accent"],
-      APPROACH_PIECE: [tp ? `${josa(tp.ko, "euro")} 접근 중` : "접근 중", "APPROACH_PIECE", qpre + "1 / 4 · 접근", "active"],
+      // ⚠️ 문구는 ui_state.py 의 _phase_words() 와 같은 값을 쓴다 —
+      // 한쪽만 고치면 목업 재생과 실물 화면이 갈라진다.
+      APPROACH_PIECE: ["타깃으로 접근 중", "APPROACH_PIECE", qpre + "1 / 4 · 접근", "active"],
       GRASP:          ["집는 중", "GRASP", qpre + "2 / 4 · 집기", "active"],
+      GRASP_ALIGN:    ["집을 자세 맞추는 중", "GRASP_ALIGN", qpre + "2 / 4 · 집기", "caution"],
       TRANSPORT:      [`${josa(destKo, "euro")} 운반 중`, "TRANSPORT", qpre + "3 / 4 · 운반", "active"],
+      NUDGE_BOX:      ["상자 앞 진입 중", "NUDGE_BOX", qpre + "3 / 4 · 운반", "active"],
       RELEASE:        ["내려놓는 중", "RELEASE", qpre + "4 / 4 · 놓기", "active"],
+      PLACE_BACKOFF:  ["상자에서 물러나는 중", "PLACE_BACKOFF", qpre + "4 / 4 · 놓기", "active"],
+      RETURN_HOME:    ["제자리로 돌아가는 중", "RETURN_HOME", "복귀", "accent"],
       DONE:           ["완료", "DONE", "4 / 4 · 놓기 완료", "success"],
       E_STOP:         ["비상 정지", "E_STOP", "정지됨", "error"],
     }[s.mode];
@@ -588,11 +654,20 @@ const MOCK = {
     if (s.mode === "APPROACH_PIECE") {
       metric = `남은 거리 ${(plen(s.leg) * (1 - s.legT)).toFixed(2)} m`;
       progress = s.legT / 4;
-    } else if (s.mode === "TRANSPORT") {
-      metric = `남은 거리 ${(plen(s.leg) * (1 - s.legT)).toFixed(2)} m`;
+    } else if (s.mode === "TRANSPORT" || s.mode === "NUDGE_BOX") {
+      // 목업 1f — 운반 중에는 남은 거리 대신 무엇을 실었는지 보여준다.
+      metric = tp ? `${tp.label} 적재됨` : "";
       progress = (2 + s.legT) / 4;
     } else if (s.mode === "GRASP") { metric = `그립 닫힘 ${Math.round(s.grip * 100)}%`; progress = (1 + s.grip) / 4; }
-    else if (s.mode === "RELEASE") { metric = `그립 ${Math.round(s.grip * 100)}%`; progress = (3 + (1 - s.grip)) / 4; }
+    else if (s.mode === "GRASP_ALIGN") { metric = "다시 세우는 중"; progress = (1 + s.grip) / 4; }
+    else if (s.mode === "RELEASE") {
+      // 목업 1g — 어디에 넣는 중인지를 좌표까지.
+      const sl = s.dest ? this.slot(s.dest, s.slotUse[s.dest]) : null;
+      metric = sl ? `${destKo} · ${sl[0].toFixed(2)}, ${sl[1].toFixed(2)} m` : destKo;
+      progress = (3 + (1 - s.grip)) / 4;
+    }
+    else if (s.mode === "PLACE_BACKOFF") { metric = "상자에서 물러나는 중"; progress = 1; }
+    else if (s.mode === "RETURN_HOME") { metric = `${s.done.length}개 완료`; progress = 1; }
     else if (s.mode === "DONE") { metric = `${s.done.length}개 완료`; progress = 1; }
 
     const pieces = M_PIECES.map(p => {
@@ -663,7 +738,13 @@ const MOCK = {
         label: l, ko: (M_PIECES.find(p => p.label === l) || {}).ko || l, n: cnt[l] || 0,
       })),
 
-      map: { boxes: M_BOXES.map(b => ({ ...b, active: b.name === s.dest && !!tp })), markers: M_MARKERS },
+      map: {
+        boxes: M_BOXES.map(b => ({ ...b, active: b.name === s.dest && !!tp })),
+        markers: M_MARKERS,
+        // 로봇 링 반경 — ui_state.py 의 map 블록과 같은 계산이다.
+        robot_r_m: 0.08,          // mission_config.ROBOT_RADIUS_PIECE_M
+        safe_r_m: 0.08 + 0.06,    // + PIECE_OBSTACLE_RADIUS_M (중심 간 접촉 거리)
+      },
       pieces,
       target_id: s.target,
       held: s.held ? { id: s.held, label: M_PIECES.find(p => p.id === s.held).label } : null,

@@ -52,7 +52,8 @@ sys.path.insert(0, str(Path(__file__).parent / "aruco"))
 import run_mission
 from mission import State, visible_labels
 from ui_bridge import DemoUI
-from ui_state import PIECE_KO, UiState
+from ui_state import PIECE_KO, UiState, resolve_label
+from ui_voice import Voice
 from vehicle_link import MissionCommand
 
 # 화면에서 온 이벤트는 GUI 스레드에서 오고, FSM 은 미션 스레드가 돌린다.
@@ -64,8 +65,9 @@ _lock = threading.Lock()
 class _Wire:
     """화면 ↔ 미션 루프 사이의 유일한 연결점."""
 
-    def __init__(self, ui_state: UiState) -> None:
+    def __init__(self, ui_state: UiState, voice) -> None:
         self.s = ui_state
+        self.voice = voice
         self.fsm = None          # 첫 사이클에 채워진다
         self.pieces: dict = {}
         self.link_label = ""
@@ -75,6 +77,16 @@ class _Wire:
     def on_event(self, action: str, payload=None) -> None:
         if action == "estop":
             self.s.set_halted(True)
+            return
+        if action == "mic":
+            self.voice.toggle()          # GUI 스레드에서 해도 되는 일이다
+            return
+        if action == "card_action" and payload == "again":
+            self.s.clear_card()          # 목업 1j "다시 말씀해 주세요"
+            self.voice.toggle()
+            return
+        if action == "card_action" and payload == "accept":
+            self.s.clear_card()          # W-401 · 불확실해도 그대로 쓰겠다
             return
         if action == "reset" or (action == "card_action"
                                  and payload in ("resume", "retry", "reset", "cancel")):
@@ -120,28 +132,29 @@ class _Wire:
                          else "지금 옮기던 것을 마친 뒤 이동합니다.")
             elif action == "submit" and payload:
                 self._instruct(str(payload).strip())
-            elif action == "mic":
-                # 음성은 아직 이 진입점에 안 물려 있다(voice_input.py 는 있다).
-                # 없는 기능을 되는 척하지 않고 그대로 알린다.
-                self.s.notify("W-000", "음성 입력은 아직 연결 전입니다 — "
-                                       "입력창에 적어주세요", "caution")
+            elif action == "run":
+                # 음성 인식이 끝나 FINAL(실행 대기)인 상태에서 전송을 눌렀다.
+                text = self.s.pending_text
+                if text:
+                    self.s.clear_pending()
+                    self._instruct(text)
 
     def _instruct(self, text: str) -> None:
         """타이핑한 문장. Claude 해석기는 run_mission 안에 있어 여기서
         못 쓴다 — 문장에서 라벨만 찾고, 못 찾으면 **지어내지 않고** 되묻는다."""
         fsm = self.fsm
         self.s.set_command(text)
-        low = text.lower()
-        hit = next((en for en, ko in PIECE_KO.items() if ko in text or en in low), None)
-        seen = set(visible_labels(self.pieces))
-        if hit and hit in seen:
+        seen = sorted(visible_labels(self.pieces))
+        hit = resolve_label(text, seen)
+        if hit:
             fsm.set_instruction(hit)
+            self.s.clear_card()
             self.s.notify("OK", f"대상: {PIECE_KO[hit]}", "success")
         else:
             self.s.raise_unparseable(
                 "어떤 기물을 말씀하시는 걸까요? 아래에서 고르셔도 되고, "
                 "다시 말씀하셔도 됩니다.",
-                sorted(seen))
+                seen)
 
 
 def main() -> int:
@@ -155,7 +168,10 @@ def main() -> int:
     sys.argv = [sys.argv[0]] + argv
 
     state = UiState()
-    wire = _Wire(state)
+    voice = Voice(state)
+    if not voice.available:
+        print(f"[음성] 사용 불가 — {voice.error}")
+    wire = _Wire(state, voice)
     ui = DemoUI(on_event=wire.on_event, fullscreen=fullscreen, debug=debug)
 
     def cycle(pose, pmap, fsm, link) -> None:
@@ -165,6 +181,7 @@ def main() -> int:
         if not wire.link_label:
             wire.link_label = getattr(link, "label", None) or type(link).__name__
         wire.drain()
+        voice.poll()
 
         if state.halted:
             # 이 훅은 fsm.step() **뒤**에 불린다. 그래서 여기서 보낸 정지가

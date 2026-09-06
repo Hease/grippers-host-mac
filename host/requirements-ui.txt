@@ -1,0 +1,14 @@
+# 시연 UI 전용 의존성 (Hease, 2026-09-07)
+#
+# 저장소의 requirements.txt 는 팀원이 관리하는 파일이라 건드리지 않는다.
+# 이 파일은 UI 를 돌리는 데만 더 필요한 것들이다 — 없어도 미션 자체는 돈다.
+#
+#   pip install -r host/requirements-ui.txt
+
+# 창 (pywebview + pyobjc 백엔드). 없으면 ui_bridge 가 브라우저로 넘어간다.
+pywebview==6.2.1
+
+# 음성 입력 (voice_input.py). 로컬에서만 돈다 — 인터넷도 API 키도 필요 없다.
+# 둘 다 없으면 마이크 버튼만 조용히 꺼지고 나머지는 정상 동작한다.
+sounddevice==0.5.3
+faster-whisper==1.2.1

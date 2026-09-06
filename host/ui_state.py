@@ -118,6 +118,29 @@ def josa(word: str, kind: str = "eul") -> str:
         return word + ("가" if jong == 0 else "이")
     return word + ("를" if jong == 0 else "을")
 
+def resolve_label(text: str, visible: list) -> Optional[str]:
+    """타이핑·음성으로 들어온 문장에서 대상 기물 라벨 하나를 뽑는다.
+
+    ⚠️ 이것은 Claude 해석기(instruction_resolver.py)의 대체물이 아니다.
+    그쪽은 "체스 말만 전부 정리해줘" 같은 문장을 이해하지만, 여기서는
+    **문장 안에 기물 이름이 그대로 들어 있을 때만** 잡는다. 못 찾으면
+    None 을 돌려주고, 부르는 쪽은 지어내지 말고 되물어야 한다(목업 1j).
+
+    지금 화면에 보이는 것만 고른다 — 안 보이는 기물을 목표로 잡으면
+    FSM 이 찾지도 못할 것을 향해 출발한다.
+    """
+    if not text:
+        return None
+    low = text.lower()
+    seen = set(visible)
+    for en, ko in PIECE_KO.items():
+        if en not in seen:
+            continue
+        if ko in text or en in low:
+            return en
+    return None
+
+
 # 작업 영역 기본값 — aruco/config.py 가 없을 때만 쓴다(명세 §8 참고값).
 FALLBACK_BOXES = [
     {"name": "toy", "x0": 0.15, "x1": 0.85, "y0": 1.45, "y1": 1.75},
@@ -361,7 +384,7 @@ class UiState:
         extra = f" (+{extra_m:.2f} m)" if extra_m else ""
         self.notify("W-108", f"장애물 감지 — 경로를 다시 찾았습니다{extra}", "active")
 
-    def note_grip_slip(self, attempt: int, total: int = 3) -> None:
+    def note_grip_slip(self, attempt: int, total: int = GRASP_MAX_ATTEMPTS) -> None:
         """W-312 · 집는 중 그립 미끄러짐 — 재파악 후 재시도(비차단)."""
         self.notify("W-312", f"그립 놓침 {attempt} / {total} — 다시 잡아 봅니다", "active")
 
@@ -383,7 +406,11 @@ class UiState:
         self.show_card(
             code="W-401 LOW_CONFIDENCE", next_state="→ 확인 후 실행",
             tone="caution", icon="?",
-            title=f"“{worst['w']}” 를 잘 못 들었어요",
+            # 조사를 고정으로 쓰면 반드시 하나는 틀린다 — 인식된 단어가
+            # "퀸을"이면 "퀸을 를", "박스"면 "박스 를"이 된다. 받침을 보고
+            # 붙이고, 닫는 따옴표 뒤에 띄어쓰기 없이 붙인다(한국어 표기).
+            title=f"“{worst['w']}”{josa(worst['w'], 'eul')[len(worst['w']):]} "
+                  f"잘 못 들었어요",
             detail="이 단어가 불확실합니다. 맞으면 그대로 실행하고, 아니면 다시 말해주세요.",
             rows=[{"id": w["w"], "label": w["w"],
                    "meta": f"{int(w.get('p', 0) * 100)}%",
@@ -629,6 +656,13 @@ class UiState:
             "map": {
                 "boxes": [dict(b, active=(b["name"] == dest_box)) for b in _boxes_from_config()],
                 "markers": _markers_from_config(),
+                # 로봇 주변에 그리는 두 링의 반경(m). 화면에서 지어내지 않고
+                # 실기 상수를 그대로 넘긴다 — 이 값이 실제와 다르면 화면이
+                # "안전해 보이는데 실제로는 스치는"(또는 그 반대) 상태가 된다.
+                #   body : 기물 회피에 쓰는 차체 반경
+                #   safe : 그 반경 + 기물 반경 = 중심 간 접촉 거리
+                "robot_r_m": round(ROBOT_RADIUS_M, 4),
+                "safe_r_m": round(ROBOT_RADIUS_M + mcfg.PIECE_OBSTACLE_RADIUS_M, 4),
             },
             "pieces": [
                 dict(p, state="done" if p["id"] in self.done_ids else

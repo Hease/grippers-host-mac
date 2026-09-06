@@ -151,14 +151,21 @@ class ArenaMap {
 
     // ── 로봇: 감지 반경 2겹 + 진행 방향 삼각형 ──────────────
     this._robotG = el("g", { class: "rb", opacity: 0 });
-    this._robotG.appendChild(el("circle", {
-      cx: 0, cy: 0, r: 30, fill: "none",
+    // 두 링의 반경은 **실기 상수에서 온다**(map.robot_r_m / map.safe_r_m).
+    // 여기 숫자를 박아 두면 팀원이 ROBOT_RADIUS_PIECE_M 을 고쳤을 때 화면만
+    // 옛 값을 그리게 되고, 그 순간 이 지도는 "안전해 보이는데 실제로는
+    // 스치는"(또는 그 반대) 그림이 된다. 아래 기본값은 상태가 오기 전
+    // 첫 프레임용이고, _syncStatic() 이 매번 실제 값으로 덮어쓴다.
+    this._ringSafe = el("circle", {
+      cx: 0, cy: 0, r: 28, fill: "none",
       stroke: "rgba(255,107,74,0.16)", "stroke-width": 1, "stroke-dasharray": "3 5",
-    }));
-    this._robotG.appendChild(el("circle", {
-      cx: 0, cy: 0, r: 18, fill: "none",
+    });
+    this._ringBody = el("circle", {
+      cx: 0, cy: 0, r: 16, fill: "none",
       stroke: "rgba(255,107,74,0.3)", "stroke-width": 1, "stroke-dasharray": "3 4",
-    }));
+    });
+    this._robotG.appendChild(this._ringSafe);
+    this._robotG.appendChild(this._ringBody);
     this._robotRot = el("g", { class: "rr" });
     this._robotTri = el("path", { d: "M13 0 -8 -9.5 -4 0 -8 9.5Z", fill: COLOR.active });
     this._robotRot.appendChild(this._robotTri);
@@ -191,6 +198,11 @@ class ArenaMap {
 
   /* 박스 구역/기준 마커는 config 에서 오므로 값이 바뀔 때만 다시 그린다. */
   _syncStatic(map) {
+    // 로봇 링 — 미터를 그대로 화면 단위로(1 m = 200). 값이 없으면(옛 상태)
+    // 만들 때의 기본값을 그대로 둔다.
+    if (map.safe_r_m != null) this._ringSafe.setAttribute("r", map.safe_r_m * 200);
+    if (map.robot_r_m != null) this._ringBody.setAttribute("r", map.robot_r_m * 200);
+
     const key = JSON.stringify([map.boxes, map.markers]);
     if (key === this._staticKey) {
       // 목적지로 지정된 박스만 라벨을 민트로 — 이건 매번 갱신.

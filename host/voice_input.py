@@ -62,11 +62,21 @@ class VoiceRecorder:
         self._frames: list[np.ndarray] = []
         self._stream: Optional[sd.InputStream] = None
         self._result: Optional[VoiceResult] = None
+        # 지금 들어오는 소리의 크기(0–1). 1i 화면의 파형 막대가 이걸 쓴다.
+        # 값이 없으면 막대가 안 움직여서 "마이크가 죽었나" 로 보인다 —
+        # 실제로 소리를 받고 있다는 유일한 시각 신호다.
+        self._level = 0.0
 
     @property
     def busy(self) -> bool:
         with self._lock:
             return self._busy
+
+    @property
+    def level(self) -> float:
+        """마지막 오디오 블록의 크기(0–1). 파형 표시용."""
+        with self._lock:
+            return self._level
 
     def toggle(self) -> bool:
         """음성 버튼 콜백에서 부른다. 반환값: 실제로 지금 녹음 중이면 True
@@ -90,7 +100,11 @@ class VoiceRecorder:
             self._frames = []
 
         def _on_audio(indata, frames, time_info, status) -> None:
+            # RMS 를 0–1 로 눌러 담는다. 말소리는 대개 RMS 0.01–0.2 라
+            # 그대로 쓰면 막대가 거의 안 움직인다 — 8배 키우고 1 에서 자른다.
+            level = float(min(1.0, np.sqrt(np.mean(np.square(indata))) * 8.0))
             with self._lock:
+                self._level = level
                 if self._recording:
                     self._frames.append(indata.copy())
 
@@ -112,6 +126,7 @@ class VoiceRecorder:
     def _stop_and_transcribe(self) -> None:
         with self._lock:
             self._recording = False
+            self._level = 0.0
             self._busy = True
             frames = list(self._frames)
         if self._stream is not None:
