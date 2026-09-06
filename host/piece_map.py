@@ -21,6 +21,7 @@ import sys
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Optional
 
 import numpy as np
 
@@ -203,7 +204,22 @@ class PieceTracker:
         best.suppressed = True
         return True
 
-    def update(self, obs_lists: list[list[PieceObs]]) -> dict[str, list[tuple[float, float]]]:
+    def update(self, obs_lists: list[list[PieceObs]],
+               suppress_new_for: Optional[set[str]] = None
+               ) -> dict[str, list[tuple[float, float]]]:
+        """`suppress_new_for`(2026-09-06, 사용자 지시 — "손 든 상태에서 새
+        관측 억제")에 든 라벨은 **새 트랙 생성만** 막는다. 지금 그리퍼에
+        들려 이동 중인 물체가 카메라에 순간적으로 다시 잡히면, 원래
+        자리(suppress_at()으로 이미 숨긴 트랙)와 로봇이 지금 있는 자리가
+        멀리 떨어져 있어 기존 트랙에 매칭이 안 되고 **새 트랙**이 생긴다
+        — 이 새 트랙은 숨김 대상이 아니라서 PIECE_CONFIRM_SEC 뒤 지도에
+        잠깐 나타났다가 PIECE_HOLD_SEC 뒤 사라진다("이미 파지한 기물이
+        잠깐씩 뜬다"는 증상).
+
+        기존 트랙에 매칭되는 관측(같은 라벨의 다른 정지된 개체, 또는
+        방금 든 그 트랙 자신)은 그대로 갱신한다 — 그래야 바닥에 남은
+        같은 라벨의 다른 개체가 이 라벨이 억제 대상이라는 이유만으로
+        지도에서 사라지는 부작용이 없다. 새 트랙 후보일 때만 버린다."""
         now = time.monotonic()
 
         # 과거 라벨 표를 서서히 잊는다 — 진짜로 라벨이 바뀔 일은 없지만(기물은
@@ -219,6 +235,8 @@ class PieceTracker:
                 if d <= best_d:
                     best, best_d = t, d
             if best is None:
+                if suppress_new_for and obs.label in suppress_new_for:
+                    continue
                 best = _Track(obs.x, obs.y, first_seen=now)
                 self._tracks.append(best)
 
