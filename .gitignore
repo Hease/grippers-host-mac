@@ -1,4 +1,5 @@
 .venv/
+.venv.stale-backup-*/
 __pycache__/
 *.pyc
 .ov_cache/
