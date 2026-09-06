@@ -64,8 +64,18 @@ class ArenaMap {
     const style = el("style");
     style.textContent = `
       .pc { transition: transform .35s cubic-bezier(.4,0,.2,1), fill .3s, opacity .3s; }
+      /* 위치와 방향은 **같은 곡선·같은 길이**여야 한다.
+         예전에는 위치 .13s linear / 방향 .25s ease-out 이었다. 두 가지가
+         동시에 어긋났다:
+           1) 길이가 달라서 회전 중에 삼각형이 가는 방향과 가리키는 방향이
+              따로 놀았다(방향이 위치보다 120ms 늦게 도착).
+           2) ease-out 은 "한 번 움직이고 멈추는" 값을 위한 곡선인데, 제자리
+              회전 중 yaw 는 매 사이클(50–140ms) 새 값이 온다. 250ms 짜리
+              감속 곡선이 끝나기 전에 계속 새로 시작되니 빨라졌다 느려졌다를
+              반복했다 — 실제 회전은 등속인데 화면만 울컥거린 것이다.
+         갱신 주기와 비슷한 길이의 linear 로 맞춘다. */
       .rb { transition: transform .13s linear; }
-      .rr { transition: transform .25s ease-out; }
+      .rr { transition: transform .13s linear; }
       .ring1 { animation: ringPulse .6s ease-in-out infinite; }
       .ring2 { animation: ringPulse2 .6s ease-in-out infinite; }
       .fade { transition: opacity .4s ease-in-out; }

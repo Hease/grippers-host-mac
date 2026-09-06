@@ -29,6 +29,7 @@
 from __future__ import annotations
 
 import argparse
+import math
 import signal
 import sys
 import time
@@ -62,6 +63,11 @@ def main() -> int:
     ap.add_argument("--step", action="store_true",
                     help="자동으로 안 넘어가고 화면에서 한 단계씩 진행")
     ap.add_argument("--speed", type=float, default=None, help="가상 로봇 전진 속도(m/s)")
+    ap.add_argument("--real-speed", action="store_true",
+                    help="실기 합의 속도로 돈다 — 전진 0.1 m/s, 제자리 회전 "
+                         "0.25 rad/s(14.3°/s). run_sim.py 의 기본값은 눈으로 "
+                         "따라가기 좋게 각각 2.5배·6.3배 빠르게 잡혀 있어서, "
+                         "시연 때 실제로 얼마나 걸릴지를 보려면 이 옵션이 필요하다")
     ap.add_argument("--noise", type=float, default=0.0, help="pose 지터(m) — ArUco 흔들림 흉내")
     ap.add_argument("--fullscreen", action="store_true", help="세로 모니터 전체화면")
     ap.add_argument("--debug", action="store_true", help="창에서 개발자 도구를 연다")
@@ -70,7 +76,16 @@ def main() -> int:
 
     signal.signal(signal.SIGINT, _on_sigint)
 
-    robot = SimRobot(speed=args.speed) if args.speed else SimRobot()
+    if args.real_speed:
+        # domain/task/motion.py 의 팀 합의값. Pi 가 실제로 내는 속도다.
+        from domain.task.motion import AGREED_LINEAR_MPS, AGREED_ROTATION_RAD_S
+        robot = SimRobot(speed=args.speed or AGREED_LINEAR_MPS,
+                         yaw_rate=math.degrees(AGREED_ROTATION_RAD_S))
+        print(f"[속도] 실기 합의값 — 전진 {AGREED_LINEAR_MPS} m/s · "
+              f"회전 {math.degrees(AGREED_ROTATION_RAD_S):.1f}°/s "
+              f"(90도 도는 데 {90/math.degrees(AGREED_ROTATION_RAD_S):.1f}초)")
+    else:
+        robot = SimRobot(speed=args.speed) if args.speed else SimRobot()
     pieces = _copy_pieces()
     fsm = MissionFSM(manual_mode=args.step)
     link = SimVehicleLink(quiet=args.quiet)
