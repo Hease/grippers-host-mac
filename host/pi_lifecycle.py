@@ -39,6 +39,7 @@ PI_USER_DEFAULT = "pi"
 CONTAINER = "IntelPi"
 BRINGUP_CMD = "/grippers/tools/ops/bringup_now.sh"
 STOP_CMD = "/grippers/tools/ops/stop_bringup.sh"
+SNAPSHOT_CMD = "/grippers/tools/ops/node_snapshot.sh"
 # bringup_now.sh 가 "이미 떠 있다"고 보는 노드 전부(그 스크립트의 STALE
 # 정규식 그대로) — teardown()이 "정리할 게 없다"고 잘못 믿지 않으려면 이
 # 목록으로 봐야 한다. 이 중 실제로 그리퍼스 미션에 필요한 핵심만 추린
@@ -123,6 +124,21 @@ def _send_zero_cmd_vel(pi_host: str, pi_user: str, attempts: int = 5,
     try:
         _docker_exec(pi_host, pi_user, cmd, timeout=timeout, login_shell=True)
     except Exception:  # noqa: BLE001 -- 최선 노력이다, 이게 실패해도 kill 은 계속 진행한다
+        pass
+
+
+def _snapshot(pi_host: str, pi_user: str, label: str, timeout: float = 15.0) -> None:
+    """node_snapshot.sh(읽기 전용)를 호출해 /tmp/bringup_audit.log 에 라벨을
+    남긴다(2026-09-06, 사용자 지시 — "노드를 켜고 종료하는 걸 더 자세히
+    모니터링"). run_mission.py 의 자동 bringup/teardown 경로도 이걸
+    거치게 해서, test_ready.sh/stop_bringup.sh 로 사람이 직접 진행하는
+    경로와 같은 로그 한 파일에 이어 붙는다 — "한 번은 잘 됐다가 재실행
+    때만 안 된다"는 증상이 다시 나오면 Pi 재부팅 없이 이 로그 하나로
+    두 경로를 모두 되짚어볼 수 있다. 실패해도(Pi 아직 준비 안 됨 등)
+    본 동작을 막지 않는다 — 어디까지나 곁다리 기록이다."""
+    try:
+        _docker_exec(pi_host, pi_user, f"{SNAPSHOT_CMD} {label}", timeout=timeout)
+    except Exception:  # noqa: BLE001 -- 스냅샷 실패가 bringup/teardown을 막으면 안 된다
         pass
 
 
@@ -220,9 +236,17 @@ def bringup(pi_host: str, pi_user: str = PI_USER_DEFAULT,
             listing = ""
         seen = {m for m in _READY_NODE_MARKERS if m in listing}
         if len(seen) == len(_READY_NODE_MARKERS):
+            # bringup_now.sh 자신은 launch 를 백그라운드로 던지자마자 끝나서
+            # (AFTER_LAUNCH_TRIGGERED 스냅샷은 노드가 아직 뜨는 중일 때다)
+            # "실제로 다 뜬 뒤"의 스냅샷은 여기, 준비 확인이 끝난 시점에서
+            # 찍어야 의미가 있다.
+            _snapshot(pi_host, pi_user, "AFTER_BRINGUP_READY_AUTO")
             return LifecycleResult(True, f"{host_ip} 기준 {len(seen)}개 핵심 노드 확인")
         time.sleep(1.5)
 
     missing = set(_READY_NODE_MARKERS) - seen
+    # 준비 시간 안에 못 뜬 것도 그냥 실패로만 남기지 않고 그 순간 상태를
+    # 남긴다 — "뭐가 없어서 못 떴는지"를 나중에 로그로 다시 볼 수 있게.
+    _snapshot(pi_host, pi_user, "BRINGUP_TIMEOUT_AUTO")
     return LifecycleResult(
         False, f"{ready_timeout:.0f}초 안에 준비 안 됨 — 못 본 노드: {', '.join(sorted(missing))}")
