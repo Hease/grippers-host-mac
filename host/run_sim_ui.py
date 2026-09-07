@@ -43,6 +43,7 @@ from mission import MissionFSM, State, visible_labels
 from ui_bridge import DemoUI
 from ui_state import PIECE_KO, UiState, resolve_label
 from ui_voice import Voice
+import box_guard
 from home_policy import MODES as HOME_MODES, HomePolicy
 
 # 가상 차량·기물은 run_sim.py 것을 그대로 쓴다(베끼지 않는다).
@@ -78,6 +79,10 @@ def main() -> int:
                          "그대로 / end=마지막 하나를 넣은 뒤에만 / never=안 감. "
                          "mission.py 는 안 고치고 전이만 밖에서 바꾼다 "
                          "(home_policy.py 참고)")
+    ap.add_argument("--no-box-guard", action="store_true",
+                    help="상자 침범 방지를 끈다 — CARRY_TO_DEST 가 상자 안 "
+                         "좌표를 향해 몰던 원래 동작으로 돌아간다(재현용). "
+                         "기본은 켜짐(box_guard.py 참고)")
     args = ap.parse_args()
 
     signal.signal(signal.SIGINT, _on_sigint)
@@ -97,6 +102,14 @@ def main() -> int:
     link = SimVehicleLink(quiet=args.quiet)
     uistate = UiState()
     voice = Voice(uistate)
+    if args.no_box_guard:
+        print("[상자 가드] 꺼짐 — 로봇이 상자 안까지 들어갑니다(실측 3.4cm)")
+        box_watch = box_guard.Watch()
+    else:
+        lim = box_guard.install()
+        print(f"[상자 가드] CARRY_TO_DEST 주행 목표의 y 를 {lim:.2f} m 로 자릅니다 "
+              f"(상자 앞면 1.45 m, box_guard.py 참고)")
+        box_watch = box_guard.Watch()
     home = HomePolicy(args.home_policy)
     if args.home_policy != "always":
         print(f"[복귀 정책] {args.home_policy} — 투하 뒤 홈 복귀를 바꿔 끼웁니다")
@@ -223,6 +236,14 @@ def main() -> int:
                 still = (State.SEARCH_TARGET, State.GRASP, State.PLACE)
                 robot.apply(link.last if fsm.state not in still else None, dt)
 
+                # 상자 침범 감시 — 막지는 않는다(box_guard.Watch 주석 참고).
+                # 실제 방지는 box_guard.install() 이 하고, 이건 그게 실기
+                # 잡음에서도 유효한지 보기 위한 눈이다.
+                if box_watch.check(robot.pose(), fsm.state.name) > 0:
+                    uistate.notify("W-109",
+                                   f"상자 침범 {box_watch.worst_m * 1000:.0f}mm "
+                                   f"({box_watch.worst_state})", "caution")
+
             voice.poll()
             ui.push(uistate.build(pose, pieces, fsm,
                                   manual_mode=fsm.manual_mode,
@@ -242,6 +263,13 @@ def main() -> int:
         ui.close()
 
     print(f"\n종료 — 마지막 상태: {fsm.state.name}")
+    if box_watch.worst_m > 0:
+        wx, wy = box_watch.worst_xy
+        print(f"⚠️  상자 침범 — 로봇 중심이 앞면을 "
+              f"{box_watch.worst_m * 1000:.0f}mm 넘었습니다 "
+              f"({box_watch.worst_state}, {wx:.3f}, {wy:.3f})")
+    else:
+        print("상자 침범 없음 — 로봇 중심이 상자 앞면(y=1.45)을 안 넘었습니다")
     return 0
 
 

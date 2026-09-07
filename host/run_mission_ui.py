@@ -54,6 +54,7 @@ from mission import State, visible_labels
 from ui_bridge import DemoUI
 from ui_state import PIECE_KO, UiState, resolve_label
 from ui_voice import Voice
+import box_guard
 from home_policy import MODES as HOME_MODES, HomePolicy
 from vehicle_link import MissionCommand
 
@@ -182,10 +183,22 @@ def main() -> int:
             skip.add(i)
     argv = [a for i, a in enumerate(argv) if i not in skip]
 
-    argv = [a for a in argv if a not in ("--ui-fullscreen", "--ui-debug")]
+    # --no-box-guard 도 이 파일 것이다 — run_mission.py 는 모른다.
+    no_guard = "--no-box-guard" in argv
+    argv = [a for a in argv
+            if a not in ("--ui-fullscreen", "--ui-debug", "--no-box-guard")]
     if "--no-view" not in argv:
         argv.append("--no-view")
     sys.argv = [sys.argv[0]] + argv
+
+    if no_guard:
+        print("[상자 가드] 꺼짐 — CARRY_TO_DEST 가 상자 안 좌표를 향해 몹니다")
+        box_watch = box_guard.Watch()
+    else:
+        lim = box_guard.install()
+        print(f"[상자 가드] CARRY_TO_DEST 주행 목표의 y 를 {lim:.2f} m 로 자릅니다 "
+              f"(상자 앞면 1.45 m, box_guard.py 참고)")
+        box_watch = box_guard.Watch()
 
     state = UiState()
     voice = Voice(state)
@@ -205,6 +218,12 @@ def main() -> int:
         if not wire.link_label:
             wire.link_label = getattr(link, "label", None) or type(link).__name__
         # 복귀 정책 — 이 훅은 fsm.step() 뒤에 불리므로 여기서 전이를 덮는다.
+        # 상자 침범 감시. 막지 않는다 — 실제 방지는 box_guard.install()
+        # 이 하고, 여기서는 실기 pose 잡음에서도 유효한지만 본다.
+        if box_watch.check(pose, fsm.state.name) > 0:
+            state.notify("W-109",
+                         f"상자 침범 {box_watch.worst_m * 1000:.0f}mm "
+                         f"({box_watch.worst_state})", "caution")
         home.after_step(fsm, wire.prev_state, pmap)
         wire.prev_state = fsm.state
         wire.drain()
