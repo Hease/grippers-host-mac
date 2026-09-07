@@ -151,3 +151,19 @@ def test_무회전_영역_밖이면_그대로_통과하지_않는다():
     robot_xy = (ex, ey - 0.15)
     result = bt.check_no_rotation_zone(robot_xy, robot_yaw_deg=60.0, box_name="chess")
     assert not result.ok
+
+
+def test_로봇이_목표영역_경계에_걸쳐도_오블리크_자세면_거부한다():
+    """2026-09-07 실기 회귀 — 로봇 xy가 좁은 목표영역 경계와 거의 겹치면
+    (=distance≈0), 예전 구현(위치 기반 방위 재사용)은 atan2가 로봇 자신의
+    위치를 가리켜 실제 자세와 무관하게 지향오차를 0으로 냈다. 그 결과
+    77도(정면 90도보다 13도 오블리크)로 서 있어도 무회전 영역을 "통과"로
+    오판해 servo1 보정이 통째로 생략됐고, 로봇이 그 자세 그대로 투하를
+    진행해 바구니를 밀었다. 이 테스트는 그 정확한 상황(경계 위 좌표 +
+    큰 오블리크 각)을 재현한다 — 반드시 거부(not ok)해야 한다."""
+    x_lo, x_hi, y_lo, y_hi = bt.target_rect(
+        "chess", bt.NO_ROTATION_HALF_WIDTH_M, bt.NO_ROTATION_INSET_DEPTH_M)
+    robot_xy = (x_lo, y_lo)   # 좁은 목표영역의 바로 그 경계 위 — 옛 구현의 distance≈0 함정
+    result = bt.check_no_rotation_zone(robot_xy, robot_yaw_deg=77.0, box_name="chess")
+    assert not result.ok, (
+        f"경계 위 좌표에서 77도 오블리크인데도 통과했다 — {result.reason}")

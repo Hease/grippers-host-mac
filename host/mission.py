@@ -1711,10 +1711,21 @@ class MissionFSM:
                 # 손대지 않는다 — 매번 정확히 중앙을 노리다가 넓은
                 # 목표영역(TARGET_HALF_WIDTH_M) 가장자리(벽 쪽)로 보정이
                 # 몰리는 위험을 없앤다.
+                # ⚠️ 2026-09-07 실기 수정: 예전엔 여기서도
+                # check_basket_insert_gate().facing_error_deg(위치 기반
+                # 방위)를 그대로 servo1 보정각으로 썼다. PLACE는 이미 목표
+                # 근처에 멈춰 도착한 상태라 로봇 xy가 넓은 목표영역
+                # (TARGET_HALF_WIDTH_M/INSET_DEPTH_M) 경계와도 자주 겹치고,
+                # 그러면 check_no_rotation_zone과 똑같은 distance≈0 함정에
+                # 걸려 실제 오블리크 각과 무관하게 보정각이 0에 가깝게
+                # 나온다 — no_rotation_zone이 "통과 아님"으로 걸러 여기까지
+                # 왔는데도 보정량 자체가 사실상 0이 되는 모순이 생긴다.
+                # basket_target.facing_offset_from_square()는 위치와 무관한
+                # 절대 지향값이라 이 함정이 없다.
                 if not basket_target.check_no_rotation_zone(
                         robot_xy, pose.yaw_deg, dest_box_name).ok:
-                    yaw_correction_deg = basket_target.check_basket_insert_gate(
-                        robot_xy, pose.yaw_deg, dest_box_name).facing_error_deg
+                    yaw_correction_deg = basket_target.facing_offset_from_square(
+                        pose.yaw_deg)
             link.send(MissionCommand("stop", "PLACE", pose.x, pose.y, pose.yaw_deg,
                                      yaw_correction_deg=yaw_correction_deg))
             status = link.poll_status() if not self.ready_to_advance else "IDLE"
