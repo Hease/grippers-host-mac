@@ -115,6 +115,54 @@ def next_waypoint(
     return NavResult((rx + ddx / ddist * step, ry + ddy / ddist * step), dist, blocked_by="piece")
 
 
+def _obstacle_blocks_ahead(
+    robot_xy: XY,
+    heading_deg: float,
+    obstacles: list[XY],
+    ahead_m: float,
+    obstacle_radius: float = mcfg.PIECE_OBSTACLE_RADIUS_M,
+    robot_radius: float = mcfg.ROBOT_RADIUS_PIECE_M,
+    margin: float = mcfg.OBSTACLE_MARGIN_M,
+) -> bool:
+    """`robot_xy`에서 `heading_deg` 방향으로 `ahead_m` 앞까지, 안전거리
+    (obstacle_radius+robot_radius+margin) 안에 장애물이 있는가.
+
+    DriveSequencer.ESCAPE 전용이다(2026-09-07) — next_waypoint()의 우회점
+    계산과 다르다: 거기는 "목표까지의 직선을 장애물이 막으면 비켜간다"는
+    계획이라 목표 방향이 있어야 성립하는데, ESCAPE는 정렬을 포기하고
+    "지금 향한 방향 그대로" 미는 것이라 비켜갈 목표 자체가 없다. 여기서는
+    그 방향으로 계속 가도 되는지(막혔으면 멈춰야 하는지)만 본다."""
+    rx, ry = robot_xy
+    heading_rad = math.radians(heading_deg)
+    hx, hy = math.cos(heading_rad), math.sin(heading_rad)
+    safe_dist = obstacle_radius + robot_radius + margin
+    for ox, oy in obstacles:
+        dx, dy = ox - rx, oy - ry
+        ahead = dx * hx + dy * hy   # 전방 투영 거리 — 음수면 뒤쪽
+        if ahead <= 0.0 or ahead > ahead_m:
+            continue
+        perp = abs(dx * (-hy) + dy * hx)   # 진행선에서 옆으로 벗어난 거리
+        if perp < safe_dist:
+            return True
+    return False
+
+
+def _obstacle_within(robot_xy: XY, obstacles: list[XY], radius: float) -> bool:
+    """장애물 중 하나라도 robot_xy로부터 radius 안에 있는가.
+
+    2026-09-07 낮~저녁 — 이 반경 안에 장애물이 들어오면 회전 대신
+    후진하게 했다가("차량 반경 안에 물체가 들어온 경우"), 그 후진 자체가
+    RETURN_HOME에서 2초 넘게 멎지 않는 사고로 이어져(사용자 관찰 —
+    "바구니를 밀면서 전진"이 아니라 이 사고가 최초 "돌진" 오인의 원인이었다)
+    같은 날 저녁 그 후진 로직 전체를 없앴다(`_choose_after_stop`/
+    `DriveMode.BACK` 관련 코드, `_obstacle_in_rotation_arc` 포함). 이
+    함수 자체는 살려 뒀다 — mission.py `_approach()`가 "닿을 만큼
+    가까우면 일단 멈추고 경로계획을 다시 짠다"는, 후진 없는 대체 로직에
+    그대로 쓴다(그쪽 정의부 주석 참고)."""
+    rx, ry = robot_xy
+    return any(math.hypot(ox - rx, oy - ry) < radius for ox, oy in obstacles)
+
+
 # ---------------------------------------------------------------------------
 # 직진/정지/회전 시퀀서
 #
@@ -137,6 +185,12 @@ class DriveMode(Enum):
     # cmd 상으로는 똑같이 "go"지만, 목표 방향으로 가고 있다는 보장이 없다는
     # 걸 호출부가 구분할 수 있게 별도 값으로 둔다.
     ESCAPE = auto()
+    # 2026-09-07 낮에 있던 BACK(장애물 회피용 후진)은 같은 날 저녁 제거했다
+    # — RETURN_HOME에서 후진이 2초 넘게 안 멎는 사고로 이어졌다(사용자
+    # 지시: "회피를 위한 후진은 빼자"). "차량 반경 안 장애물"에 대한
+    # 대응은 이제 mission.py `_approach()`가 STOP + 경로 재계획으로
+    # 대신한다(그쪽 정의부 주석 참고) — DriveSequencer/DriveMode 차원의
+    # 별도 회피 동작은 더 이상 없다.
 
 
 @dataclass
@@ -219,8 +273,24 @@ class DriveSequencer:
         robot_yaw_deg: float,
         target_xy: XY,
         obstacles: list[XY],
+        avoidance_obstacles: list[XY] = (),
         **kwargs,
     ) -> DriveCommand:
+        """`avoidance_obstacles`: ESCAPE(정렬 무시 강제 전진) 중 "이 방향
+        그대로 가도 되는가"를 보는 데만 쓰는 장애물 목록이다(2026-09-07,
+        사용자 지시 — 실기에서 ESCAPE 도중 축구공을 못 피하고 그대로
+        들이받은 사고). `obstacles`(위, next_waypoint용)와 일부러
+        분리했다 — next_waypoint의 우회점 계산은 "가장 가까운 장애물
+        하나만 보고 비켜간다"는 단순한 방식이라, 서로 미는 장애물 두 개
+        사이에서 영원히 왕복하는 버그가 있었다(_approach() 정의부 주석
+        참고, 그래서 평소 주행은 obstacles=[] 로 그 계산 자체를 안 쓴다).
+        여기서는 그 우회 계산을 재사용하지 않고 전방 차단 여부만 본다 —
+        그 버그를 다시 불러들이지 않는다.
+
+        2026-09-07 낮에는 이 인자를 "차량 반경 안 장애물·45도 넘는 회피각
+        이면 후진"에도 같이 썼는데, 그 후진 로직 자체를 같은 날 저녁
+        없앴다(navigator._obstacle_within 정의부, mission._approach()
+        정의부 참고) — 이제 이 인자는 ESCAPE 전방 차단 판단에만 쓴다."""
         nav = next_waypoint(robot_xy, target_xy, obstacles, **kwargs)
 
         dx = nav.waypoint[0] - robot_xy[0]
@@ -229,33 +299,50 @@ class DriveSequencer:
             fresh_target_yaw = robot_yaw_deg   # 이미 도착 — 방향 계산 의미 없음
         else:
             fresh_target_yaw = float(np.degrees(np.arctan2(dy, dx)))
+        fresh_yaw_err = (fresh_target_yaw - robot_yaw_deg + 180.0) % 360.0 - 180.0
 
         if self._mode == DriveMode.ESCAPE:
             # 정렬 무시하고 잠깐 전진하는 중 — 사이클이 다 찰 때까지는 판단
             # 로직 전체를 건너뛴다(회전 이력도 안 쌓는다). 다 차면 처음
             # 사이클(mode=None)처럼 처음부터 다시 판단한다.
             self._escape_remaining -= 1
-            if self._escape_remaining > 0:
-                yaw_err = (fresh_target_yaw - robot_yaw_deg + 180.0) % 360.0 - 180.0
+            blocked_ahead = bool(avoidance_obstacles) and _obstacle_blocks_ahead(
+                robot_xy, robot_yaw_deg, avoidance_obstacles,
+                mcfg.ESCAPE_OBSTACLE_STOP_AHEAD_M)
+            if self._escape_remaining > 0 and not blocked_ahead:
                 return DriveCommand(
                     mode=DriveMode.ESCAPE, waypoint=nav.waypoint,
-                    target_yaw_deg=fresh_target_yaw, yaw_error_deg=yaw_err,
+                    target_yaw_deg=fresh_target_yaw, yaw_error_deg=fresh_yaw_err,
                     dist_to_target=nav.dist_to_target, blocked_by=nav.blocked_by,
+                )
+            if blocked_ahead:
+                # 사이클이 남았어도 여기서 강제로 끊는다 — 조용히 FORWARD/
+                # ROTATE로 다시 판단하게 두면 이번 사이클에 이미 전진 명령이
+                # 나갈 수 있다(아래 mode=None 분기가 이번 호출 안에서 바로
+                # 새 판정까지 마치고 반환하기 때문). 부딪히기 직전이라
+                # 이번 사이클은 무조건 STOP으로 내보낸다.
+                self._escape_remaining = 0
+                self._toggle_count = 0
+                self._last_rotate_sign = None
+                self._mode = None
+                return DriveCommand(
+                    mode=DriveMode.STOP, waypoint=robot_xy,
+                    target_yaw_deg=fresh_target_yaw, yaw_error_deg=fresh_yaw_err,
+                    dist_to_target=nav.dist_to_target, blocked_by="piece",
                 )
             self._mode = None
 
         if self._mode is None:
             # 구간의 첫 사이클 — STOP 전이 신호 없이 바로 알맞은 모드로 시작.
-            yaw_err = (fresh_target_yaw - robot_yaw_deg + 180.0) % 360.0 - 180.0
             self._mode = (DriveMode.FORWARD
-                          if abs(yaw_err) <= self.yaw_tolerance_deg
-                          else self._enter_rotate(yaw_err))
+                          if abs(fresh_yaw_err) <= self.yaw_tolerance_deg
+                          else self._enter_rotate(fresh_yaw_err))
             if self._mode == DriveMode.ROTATE:
                 self._rotate_target_yaw = fresh_target_yaw
             elif self._mode == DriveMode.ESCAPE:
                 return DriveCommand(
-                    mode=DriveMode.ESCAPE, waypoint=nav.waypoint,
-                    target_yaw_deg=fresh_target_yaw, yaw_error_deg=yaw_err,
+                    mode=self._mode, waypoint=nav.waypoint,
+                    target_yaw_deg=fresh_target_yaw, yaw_error_deg=fresh_yaw_err,
                     dist_to_target=nav.dist_to_target, blocked_by=nav.blocked_by,
                 )
 

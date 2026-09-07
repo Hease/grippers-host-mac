@@ -136,15 +136,19 @@ def test_ArUco상_계획량을_다_돌아도_Pi_라이다가_안_맞으면_안_�
     assert fsm.state == State.NUDGE_BOX, "Pi 라이다가 안 맞는데 PLACE로 넘어갔다"
 
 
-def test_Pi_라이다가_먼저_맞으면_ArUco_계획량_전에도_끝난다():
-    """반대 방향 회귀도 지킨다 — Pi가 이미 맞다고 하면 ArUco 계획량을 다
-    안 돌았어도 과잉 회전 없이 바로 멈춘다."""
+def test_Pi_라이다_보정은_더_이상_회전판을_조기_종료시키지_않는다():
+    """2026-09-07, 사용자 지시("라이다는 그냥 다 지워") — 예전엔 이
+    테스트가 "Pi가 이미 맞다고 하면(fix.yaw_rad) ArUco 계획량을 다 안
+    돌았어도 바로 멈춘다"는 회귀를 지켰다. 그 신호의 공급원(Pi의
+    retreat_if_too_close 라이브 점검)을 없앴으므로 이제 Pi 값은 전혀
+    안 본다 — ArUco 계획량(moved>=want_m)을 다 돌기 전까지는 계속
+    NUDGE_BOX에 머물러야 한다(회귀 방지, 방향은 반대)."""
     fsm, link = _rotate_fsm("rotate_left", amount_rad=0.5)
-    link.last_basket_fix = BasketFix(yaw_rad=0.01)   # 이미 데드밴드 안
+    link.last_basket_fix = BasketFix(yaw_rad=0.01)   # 이제 아무 효과 없어야 한다
 
     fsm.step(link.pose(), {}, link)
 
-    assert fsm.state == State.PLACE
+    assert fsm.state == State.NUDGE_BOX
 
 
 def test_회전판은_거리_기반_goal을_계산하지_않는다():

@@ -27,6 +27,7 @@ STOP -> ROTATE(또는 ESCAPE) 전이는 그다음 호출에야 반환값에 보�
 
 from __future__ import annotations
 
+import math
 import sys
 from pathlib import Path
 
@@ -110,6 +111,102 @@ def test_ESCAPE는_설정된_사이클_동안만_지속되고_그다음_처음�
     # 있으니(robot_yaw=0) FORWARD 로 나가야 한다.
     cmd = seq.update(robot_xy, 0.0, (1.0, 0.0), [])
     assert cmd.mode == DriveMode.FORWARD
+
+
+def test_ESCAPE_중_전방에_장애물이_있으면_즉시_STOP한다():
+    """2026-09-07: 실기에서 ESCAPE(정렬 무시 강제 전진) 도중 장애물(축구공)을
+    못 피하고 그대로 들이받은 사고 이후 추가. avoidance_obstacles로 넘긴
+    장애물이 지금 향한 방향 바로 앞(ESCAPE_OBSTACLE_STOP_AHEAD_M 이내,
+    안전거리 안)에 있으면 남은 사이클과 무관하게 그 자리에서 STOP한다 —
+    next_waypoint()의 우회점 계산(obstacles=[])과는 별개 경로다.
+
+    차량 반경(ROBOT_RADIUS_PIECE_M) 밖이지만 안전거리 안인 거리를 골랐다
+    — 그보다 더 가까우면(반경 안) BACK이 STOP보다 먼저 걸린다(아래
+    test_장애물이_차량_반경_안이면_ESCAPE_중에도_BACK이_STOP보다_우선한다
+    참고)."""
+    seq = DriveSequencer(yaw_tolerance_deg=5.0)
+    robot_xy = (0.0, 0.0)
+
+    cmd = seq.update(robot_xy, 170.0, (1.0, 0.0), [])
+    assert cmd.mode == DriveMode.ROTATE
+    flips = [170.0, -170.0] * mcfg.ROTATE_OSCILLATION_TOGGLE_LIMIT
+    cmd = None
+    for flip_yaw in flips:
+        cmd = _round_trip(seq, robot_xy, flip_yaw)
+        if cmd.mode == DriveMode.ESCAPE:
+            break
+    assert cmd is not None and cmd.mode == DriveMode.ESCAPE
+    remaining_before = seq._escape_remaining
+    assert remaining_before > 1, "테스트가 성립하려면 최소 2사이클은 남아 있어야 한다"
+
+    # 로봇이 지금 +x(동쪽, yaw=0)로 ESCAPE 중이라 치고, 그 바로 앞
+    # 안전거리 안(그러나 차량 반경 0.08m 밖)에 장애물을 하나 둔다.
+    blocking_obstacle = [(0.12, 0.0)]
+    cmd = seq.update(robot_xy, 0.0, (1.0, 0.0), [],
+                     avoidance_obstacles=blocking_obstacle)
+    assert cmd.mode == DriveMode.STOP, "전방 장애물을 무시하고 계속 ESCAPE했다"
+    assert seq._escape_remaining == 0, "STOP 후에도 ESCAPE 잔여 사이클이 남아 있다"
+
+
+def test_ESCAPE_중_장애물이_멀거나_옆에_있으면_계속_전진한다():
+    """안전거리 밖(또는 방향 밖)의 장애물은 ESCAPE를 안 끊는다 — 방 안의
+    모든 기물에 매번 걸려 ESCAPE가 사실상 무력화되면 안 된다."""
+    seq = DriveSequencer(yaw_tolerance_deg=5.0)
+    robot_xy = (0.0, 0.0)
+
+    cmd = seq.update(robot_xy, 170.0, (1.0, 0.0), [])
+    assert cmd.mode == DriveMode.ROTATE
+    flips = [170.0, -170.0] * mcfg.ROTATE_OSCILLATION_TOGGLE_LIMIT
+    cmd = None
+    for flip_yaw in flips:
+        cmd = _round_trip(seq, robot_xy, flip_yaw)
+        if cmd.mode == DriveMode.ESCAPE:
+            break
+    assert cmd is not None and cmd.mode == DriveMode.ESCAPE
+
+    far_obstacle = [(2.0, 0.0)]     # 안전거리 밖으로 멀다
+    side_obstacle = [(0.12, 1.0)]   # 진행 방향 옆(perp가 크다), 반경 밖
+    cmd = seq.update(robot_xy, 0.0, (1.0, 0.0), [], avoidance_obstacles=far_obstacle)
+    assert cmd.mode == DriveMode.ESCAPE
+    cmd = seq.update(robot_xy, 0.0, (1.0, 0.0), [], avoidance_obstacles=side_obstacle)
+    assert cmd.mode == DriveMode.ESCAPE
+
+
+def test_avoidance_obstacles가_가까워도_더는_후진하지_않는다():
+    """2026-09-07, 사용자 지시로 회피용 후진(DriveMode.BACK) 전체를
+    없앴다 — 낮에 넣은 "차량 반경 안 장애물·45도 넘는 회피각이면 후진"이
+    RETURN_HOME에서 후진이 2초 넘게 안 멎는 사고로 이어졌다("회피를 위한
+    후진은 빼자"). `DriveMode`에 `BACK` 자체가 없어졌고, `avoidance_
+    obstacles`가 아무리 가까워도(차량 반경 0.08m 안 포함) ESCAPE 판단
+    (방향 토글 워치독)만 그대로 남고 그 외엔 평소 ROTATE/FORWARD와
+    다르지 않아야 한다. "차량 반경 안 장애물"에 대한 대응은 이제
+    navigator가 아니라 mission.py `_approach()`가 담당한다
+    (test_approach_near_obstacle_stops.py 참고)."""
+    assert not hasattr(DriveMode, "BACK"), "DriveMode.BACK이 아직 남아 있다"
+
+    seq = DriveSequencer(yaw_tolerance_deg=5.0)
+    robot_xy = (0.0, 0.0)
+
+    touching_obstacle = [(0.05, 0.0)]   # 차량 반경(0.08m) 안
+    cmd = seq.update(robot_xy, 0.0, (1.0, 0.0), [],
+                     avoidance_obstacles=touching_obstacle)
+    assert cmd.mode == DriveMode.FORWARD, "반경 안 장애물인데도 평소처럼 안 갔다"
+
+    seq2 = DriveSequencer(yaw_tolerance_deg=5.0)
+    nearby_obstacle = [(0.2, 0.2)]   # 예전 문턱(0.4m) 안, 회전 궤적과도 겹침
+    target_60deg = (0.5, 0.5 * math.tan(math.radians(60.0)))
+    cmd2 = seq2.update(robot_xy, 0.0, target_60deg, [],
+                       avoidance_obstacles=nearby_obstacle)
+    assert cmd2.mode == DriveMode.ROTATE, "45도 넘는 회피인데도 평소처럼 안 돌았다"
+
+
+def test_장애물이_없으면_45도_넘는_회전도_평소처럼_ROTATE한다():
+    """장애물이 전혀 없는 곳에서 RETURN_HOME처럼 정상적으로 크게(예: 180도
+    가까이) 도는 것까지 45도 문턱에 걸려 후진하면 안 된다."""
+    seq = DriveSequencer(yaw_tolerance_deg=5.0)
+    robot_xy = (0.0, 0.0)
+    cmd = seq.update(robot_xy, 0.0, (-1.0, 0.0), [])   # 180도차, 장애물 없음
+    assert cmd.mode == DriveMode.ROTATE
 
 
 def test_ESCAPE로_넘어갈_때마다_escape_count가_누적된다():

@@ -36,7 +36,7 @@ sys.path.insert(0, str(Path(__file__).parent / "aruco"))
 import config as cfg
 from localizer import Pose, box_pose
 import basket_target
-from navigator import GridPathPlanner, DriveCommand, DriveMode, DriveSequencer
+from navigator import GridPathPlanner, DriveCommand, DriveMode, DriveSequencer, _obstacle_within
 from vehicle_link import (BACK_OFF, CREEP_IN, RE_AIM, GraspCorrection,
                           MissionCommand, VehicleLink)
 
@@ -533,6 +533,44 @@ class MissionFSM:
         아니라 이 값으로 해야 한다(부분목표는 중간 지점일 뿐이라, 그걸로
         판정하면 아직 한 축 남았는데 도착했다고 착각한다)."""
         self.nav_goal = target_xy
+
+        # 2026-09-07 저녁 — 낮에 넣었던 "장애물이 차량 반경 안이면 후진"
+        # (navigator.DriveMode.BACK)이 RETURN_HOME에서 후진이 2초 넘게
+        # 안 멎는 사고로 이어져, 사용자 지시("회피를 위한 후진은 빼자")로
+        # 그 로직 전체를 없앴다. 대신 여기서 그 자리에 완전히 멈추고,
+        # 이미 검증된 GridPathPlanner의 격자 회피(여러 장애물을 안전하게
+        # 피하는, next_waypoint의 단일 장애물 우회점 방식과 달리 왕복
+        # 버그가 없는 경로계획)에 다시 판단을 맡긴다 — 후진이라는 새
+        # 동작을 추가하는 대신 기존에 신뢰하는 계획기를 신뢰하는 쪽이다.
+        #
+        # `_path_planner.reset()`을 같이 부르는 이유: GridPathPlanner는
+        # "로봇 위치가 그때와 비슷하면(PATH_REPLAN_MIN_MOVE_M 이내) 다시
+        # 계산 안 하고 얼려 둔 결과를 그대로 돌려준다"는 캐시가 있는데,
+        # 그 캐시는 로봇 위치만 보고 장애물 배치 변화는 안 본다. 지금
+        # 멈추면 다음 사이클도 위치가 거의 그대로라 캐시가 계속 재사용될
+        # 텐데, 그 캐시는 "장애물이 이렇게 가까워지기 전" 계산이라 못
+        # 믿는다 — reset으로 지워 두면, 이 정지가 풀리고 다시 움직일 때
+        # 지금의(가까워진) 장애물 배치를 반영한 새 부분목표가 나온다.
+        #
+        # ⚠️ 실기 미검증 — 오늘(2026-09-07) 배터리 저전압으로 실기 검증을
+        # 못 하고 코드·단위테스트만으로 마감했다. 다음 실기에서 "장애물에
+        # 너무 가까워지면 그 자리에 서고, 풀리면 자연스럽게 돌아가는가"를
+        # 확인할 것.
+        if _obstacle_within(robot_xy, obstacles, mcfg.ROBOT_RADIUS_PIECE_M):
+            self._path_planner.reset()
+            self.nav_corner = None
+            self.nav_path = None
+            dist_now = math.hypot(target_xy[0] - robot_xy[0], target_xy[1] - robot_xy[1])
+            stop_nav = DriveCommand(
+                mode=DriveMode.STOP, waypoint=robot_xy,
+                target_yaw_deg=pose.yaw_deg, yaw_error_deg=0.0,
+                dist_to_target=dist_now, blocked_by="piece",
+            )
+            self.last_nav = stop_nav
+            self.last_cmd = _send_drive(link, pose, self.state.name, stop_nav,
+                                        target_label=target_label)
+            return dist_now
+
         # 회피는 GridPathPlanner 가 격자 탐색으로 전부 처리한다 —
         # DriveSequencer/next_waypoint 쪽엔 장애물을 안 넘긴다. 거기 회피
         # 로직은 가장 가까운 장애물 하나만 보고 우회점을 잡아서, 서로 밀어내는
@@ -547,8 +585,17 @@ class MissionFSM:
             robot_xy, pose.yaw_deg, target_xy, obstacles)
         self.nav_corner = corner
         self.nav_path = self._path_planner.last_path
+        # avoidance_obstacles: next_waypoint용 obstacles([])와 다르다 —
+        # ESCAPE(정렬 무시 강제 전진) 동안 "이 방향 그대로 가도 되는가",
+        # 그리고 회전 대신 후진해야 하는가(장애물이 차량 반경 안·회피각이
+        # 45도 초과)를 보는 별도 안전판이다(2026-09-07, 사용자 지시 —
+        # 실기에서 ESCAPE 도중 축구공을 못 피하고 그대로 들이받은 사고,
+        # 그리고 "back 트리거를 host에게 맡기고" 지시 이후). navigator.
+        # DriveSequencer.update() 주석 참고 — next_waypoint의 우회점 계산을
+        # 재사용하지 않는 이유가 거기 있다.
         escape_count_before = self._drive.escape_count
-        nav = self._drive.update(robot_xy, pose.yaw_deg, sub_goal, [])
+        nav = self._drive.update(robot_xy, pose.yaw_deg, sub_goal, [],
+                                 avoidance_obstacles=obstacles)
         if self._drive.escape_count > escape_count_before:
             # 2026-09-05: 사용자가 "yaw 진동으로 시간이 지체된다"고 보고해서
             # 추가한 계측 — DriveSequencer.escape_count 정의부 참고. 값을
@@ -1366,16 +1413,39 @@ class MissionFSM:
             # 멈춘 것으로 치고 `_plan_basket_fix`의 예산(BASKET_CREEP_BUDGET_M)
             # 을 또 청구해 몇 사이클 만에 소진시켜 버린다(실측: 0.376m→
             # 0.372m 두 판독이 사실상 제자리인데 예산 0.40m 를 통째로 태워
-            # 이후 계속 INSERT_BLOCKED 만 반복). 라이브 점검
-            # (baseline_mission.BaselineCarryState)이 실제로 보내는 것은
-            # `retreat_if_too_close` 뿐이고, 그건 언제나 forward_m 이
-            # 음수다 — 그래서 음수일 때만 "지금 막 온 라이브 신호"로 믿는다.
-            # 0 이상(양수/None)은 PLACE 국면의 잔여 보고로 보고 무시한다 —
-            # PLACE 가 want_m 완주 후 다시 물어서 정식으로 처리한다.
+            # 이후 계속 INSERT_BLOCKED 만 반복).
+            #
+            # ⚠️ 2026-09-07, 사용자 지시("라이다 없애... back 트리거를
+            # host에게 맡기고") — live_too_close는 예전에 Pi의 실시간
+            # 라이다 보고(baseline_mission.BaselineCarryState의
+            # retreat_if_too_close, 언제나 forward_m<0)를 그대로 믿었다.
+            # 그런데 그 판정이 라이다 하한(BASKET_MIN_LIDAR_M) 바로
+            # 근처에서 판독이 흔들려, 실제로는 괜찮은 상황에서도
+            # INSERT_BLOCKED가 계속 뜨는 문제가 실기로 확인됐다(2026-09-07,
+            # 세 번째 기물 INSERT에서 12초 넘게 NUDGE_BOX<->PLACE 왕복).
+            # Pi 쪽 그 판정 자체를 없앴으므로(baseline_mission.py 참고)
+            # 여기서도 그 값을 더는 못 믿는다 — 대신 아래 hard_stop과 같은
+            # 방식(상자 중심까지의 순수 ArUco 거리)으로, 다만 hard_stop보다
+            # 넉넉한 반경(BASKET_BACK_TRIGGER_MARGIN_M)에서 미리 걸리게
+            # 한다. 이러면 실제로 hard_stop(완전정지) 반경에 닿기 전에 이
+            # 판단으로 먼저 후진해 빠져나온다.
             link.poll_status()
-            fix = link.last_basket_fix
-            live_too_close = fix is not None and fix.forward_m is not None \
-                and fix.forward_m < 0
+            dest_box_name = mcfg.PIECE_DEST_BOX.get(self.target_label)
+            dist_to_box_center = None
+            if dest_box_name is not None:
+                box_x, box_y, _box_yaw = box_pose(dest_box_name)
+                dist_to_box_center = math.hypot(robot_xy[0] - box_x,
+                                                robot_xy[1] - box_y)
+            live_too_close = (
+                dist_to_box_center is not None
+                and dist_to_box_center <= (cfg.BOX_L / 2.0
+                                           + mcfg.BASKET_BACK_TRIGGER_MARGIN_M))
+            # `fix`(예전 link.last_basket_fix)는 이제 항상 None이다 — 위에서
+            # 그 공급원(Pi의 retreat_if_too_close 라이브 점검)을 없앴다.
+            # 아래 회전판 done_confirmed와 진전 정체 판정(pi_error)이 여전히
+            # `fix is not None`을 검사하므로, 이름만 남겨 그 분기들이 항상
+            # ArUco 폴백으로 떨어지게 한다(NameError 방지 겸 의도 표시).
+            fix = None
             # 2026-09-03 실기(rook/box, 두 바구니 다): 여기서 매 사이클
             # take_basket_ready_early()를 무조건 소비해서 회전(rotate)·좌우
             # (left/right) 축의 "끝났다"에도 같이 넣고 있었다. 그런데
@@ -1407,12 +1477,10 @@ class MissionFSM:
             # `_plan_basket_fix`는 너무 가까우면(forward_m<0) 애초에 axis
             # ="back" 계획을 낸다 — 이 반경 안에서 가장 먼저 나올 계획이
             # 바로 그것이다.
+            # dest_box_name/dist_to_box_center는 위 live_too_close에서 이미
+            # 구했다 — 여기서 다시 box_pose()를 부르지 않고 그대로 쓴다.
             hard_stop = False
-            dest_box_name = mcfg.PIECE_DEST_BOX.get(self.target_label)
             if dest_box_name is not None:
-                box_x, box_y, _box_yaw = box_pose(dest_box_name)
-                dist_to_box_center = math.hypot(robot_xy[0] - box_x,
-                                                robot_xy[1] - box_y)
                 hard_radius = cfg.BOX_L / 2.0 + mcfg.BASKET_HARD_STOP_MARGIN_M
                 hard_stop = dist_to_box_center <= hard_radius
             # 사용자 지시(2026-09-04): 정면으로 딱 맞춰 서는 것을 강제하지
@@ -1462,17 +1530,17 @@ class MissionFSM:
             # live_too_close·hard_stop·ready_early)는 이미 그 자체로
             # 재확인이니 debounce가 필요 없다.
             if is_rotate:
-                if fix is not None and fix.yaw_rad is not None:
-                    # 회전판은 Pi 라이다가 직접 확인해 줄 때만 "끝났다"로
-                    # 본다 — check_insert가 실제로 판정하는 기준과 맞춘다.
-                    # gate_ok를 여기 넣지 않는다 — 위 2026-09-05 코멘트 참고.
-                    done_confirmed = (
-                        abs(fix.yaw_rad) <= mcfg.NUDGE_ROTATE_DIAGONAL_TOLERANCE_RAD
-                        or live_too_close or hard_stop)
-                else:
-                    # Pi 값이 아직 없을 때만 쓰는 ArUco 폴백. ready_early는
-                    # 절대 안 넣는다 — 위 주석 참고.
-                    done_confirmed = moved >= want_m or live_too_close or hard_stop
+                # ⚠️ 2026-09-07 — 예전엔 여기서 Pi의 실시간 라이다 요
+                # 실측(fix.yaw_rad)이 NUDGE_ROTATE_DIAGONAL_TOLERANCE_RAD
+                # (20도) 안이면 그 자리에서 그만 돌게 했다. 그 신호의 유일한
+                # 공급원이 Pi의 라이브 라이다 점검(baseline_mission.
+                # BaselineCarryState의 retreat_if_too_close)이었는데, 그
+                # 판정이 라이다 하한 근처에서 흔들려 실제로는 괜찮은데도
+                # INSERT_BLOCKED가 계속 뜨는 문제가 확인돼(위 live_too_close
+                # 주석 참고) Pi 쪽에서 아예 없앴다 — 그래서 이제 이 미세조정은
+                # 못 받는다. ArUco 데드레커닝(moved>=want_m) 폴백만 남는다.
+                # ready_early는 절대 안 넣는다(위 주석 참고).
+                done_confirmed = moved >= want_m or live_too_close or hard_stop
                 host_gate_hit = gate_ok
             elif axis in ("left", "right"):
                 done_confirmed = moved >= want_m or live_too_close or hard_stop
@@ -1643,10 +1711,21 @@ class MissionFSM:
                 # 손대지 않는다 — 매번 정확히 중앙을 노리다가 넓은
                 # 목표영역(TARGET_HALF_WIDTH_M) 가장자리(벽 쪽)로 보정이
                 # 몰리는 위험을 없앤다.
+                # ⚠️ 2026-09-07 실기 수정: 예전엔 여기서도
+                # check_basket_insert_gate().facing_error_deg(위치 기반
+                # 방위)를 그대로 servo1 보정각으로 썼다. PLACE는 이미 목표
+                # 근처에 멈춰 도착한 상태라 로봇 xy가 넓은 목표영역
+                # (TARGET_HALF_WIDTH_M/INSET_DEPTH_M) 경계와도 자주 겹치고,
+                # 그러면 check_no_rotation_zone과 똑같은 distance≈0 함정에
+                # 걸려 실제 오블리크 각과 무관하게 보정각이 0에 가깝게
+                # 나온다 — no_rotation_zone이 "통과 아님"으로 걸러 여기까지
+                # 왔는데도 보정량 자체가 사실상 0이 되는 모순이 생긴다.
+                # basket_target.facing_offset_from_square()는 위치와 무관한
+                # 절대 지향값이라 이 함정이 없다.
                 if not basket_target.check_no_rotation_zone(
                         robot_xy, pose.yaw_deg, dest_box_name).ok:
-                    yaw_correction_deg = basket_target.check_basket_insert_gate(
-                        robot_xy, pose.yaw_deg, dest_box_name).facing_error_deg
+                    yaw_correction_deg = basket_target.facing_offset_from_square(
+                        pose.yaw_deg)
             link.send(MissionCommand("stop", "PLACE", pose.x, pose.y, pose.yaw_deg,
                                      yaw_correction_deg=yaw_correction_deg))
             status = link.poll_status() if not self.ready_to_advance else "IDLE"

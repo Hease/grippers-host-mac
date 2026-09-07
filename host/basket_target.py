@@ -91,7 +91,20 @@ MAX_APPROACH_DIST_M = 0.25     # 목표 영역에서 이 거리 안이면 "가�
 # 90도(완전히 옆을 봄)까지는 안 열어 준다.
 # 2026-09-05 실기(manual_insert_probe.py) 후 사용자 지시로 75도로 더 늘렸다.
 # ✅ 2026-09-06 실기 확인 — 75도까지 INSERT 정상 동작(사용자 확인).
-MAX_FACING_ERROR_DEG = 75.0
+#
+# 2026-09-07 낮 — 사용자 지시로 85도로 더 늘렸다가("75도도 더 올린다"),
+# 같은 날 실기에서 이 게이트가 통과시킨 지향오차(46.1도)가 arm_driver_node.
+# MAX_DROP_YAW_OFFSET_RAD(그리퍼 팔 servo1이 실제로 고칠 수 있는 한계, 45도)를
+# 넘어 SAFE_300 보정이 거부되고 그대로 투하 — "바구니에 돌진"하는 사고로
+# 이어졌다(사용자 보고). 즉 이 게이트(진입 허용)가 팔의 실제 보정 한계보다
+# 넉넉하면, 팔이 못 고치는 각도인데도 진입을 허용해 버리는 모순이 생긴다.
+# 사용자 지시로 45도로 되돌려 팔의 보정 한계와 정확히 맞춘다 — 이 문턱을
+# 넘는 지향오차는 이제 게이트에서 막혀 NUDGE_BOX가 회전을 더 시도한다
+# (라이다 없이도 이 축은 ArUco 기반이라 계속 동작한다).
+#
+# ⚠️ 라이다 없이 회전이 이 문턱 안으로 끝까지 수렴 못 하면 NUDGE_BOX가
+# 거기 갇힐 위험이 있다 — 아직 실기로 검증 안 됨. 다음 실행에서 지켜볼 것.
+MAX_FACING_ERROR_DEG = 45.0
 
 # ---------------------------------------------------------------------------
 # "servo1을 안 돌려도 되는" 좁은 영역 (사용자 지시, 2026-09-05 밤 — "servo1이
@@ -202,23 +215,67 @@ def check_basket_insert_gate(
     return InsertGateResult(ok, distance, facing_error, (tx, ty), reason)
 
 
+def facing_offset_from_square(robot_yaw_deg: float) -> float:
+    """지금 robot_yaw_deg가 두 상자 공통의 정면 자세(mcfg.BOX_FACE_YAW_DEG,
+    세계좌표 +y를 보는 자세)에서 얼마나 벗어나 있는지를, 기존
+    check_basket_insert_gate()의 facing_error_deg와 같은 부호 규약
+    (목표 방위 - robot_yaw_deg)으로 낸다. 위치와 완전히 무관한 절대
+    지향값이라 로봇이 목표영역 안/경계에 있어도 안전하다(아래
+    check_no_rotation_zone docstring의 2026-09-07 수정 사유 참고).
+
+    ⚠️ 부호를 반드시 이 순서(BOX_FACE_YAW_DEG - robot_yaw_deg)로 유지할
+    것 — domain/task/baseline_mission.py의 SAFE_300이 이미 "이 값을 그대로
+    넘기면 servo 1이 반대로 돈다"는 사실(2026-09-05 실기)을 전제로
+    `correction_rad = -radians(yaw_correction_deg)`로 부호를 뒤집어 흡수
+    하고 있다 — 그 전제는 check_basket_insert_gate()의 기존 부호 규약과
+    맞춰 검증된 것이라, 여기서 반대로 빼면(robot_yaw_deg - BOX_FACE_YAW_DEG)
+    실기에서 팔이 오차를 줄이는 대신 키우는 방향으로 돈다."""
+    return ((mcfg.BOX_FACE_YAW_DEG - robot_yaw_deg + 180.0) % 360.0) - 180.0
+
+
 def check_no_rotation_zone(
     robot_xy: tuple[float, float],
     robot_yaw_deg: float,
     box_name: str,
 ) -> InsertGateResult:
-    """지금 자세 그대로(servo1 보정 없이) 놓아도 좁은 목표영역
-    (NO_ROTATION_HALF_WIDTH_M/NO_ROTATION_INSET_DEPTH_M)에 들어갈 만한지
-    판정한다. PLACE는 이 결과가 ok면 yaw_correction_deg를 0으로 두고 그냥
-    드랍한다(위 NO_ROTATION_* 주석 참고) — 거리 조건은 안 본다(PLACE는
-    이미 멈춰 도착한 상태라 항상 가깝다), 지향만 본다."""
-    return check_basket_insert_gate(
-        robot_xy, robot_yaw_deg, box_name,
-        half_width_m=NO_ROTATION_HALF_WIDTH_M,
-        inset_depth_m=NO_ROTATION_INSET_DEPTH_M,
-        max_distance_m=math.inf,
-        facing_tolerance_deg=NO_ROTATION_FACING_TOLERANCE_DEG,
-    )
+    """지금 자세 그대로(servo1 보정 없이) 놓아도 정면에 가까운지 판정한다.
+    PLACE는 이 결과가 ok면 yaw_correction_deg를 0으로 두고 그냥 드랍한다
+    (위 NO_ROTATION_* 주석 참고) — 거리 조건은 안 본다(PLACE는 이미 멈춰
+    도착한 상태라 항상 가깝다), 지향만 본다.
+
+    ⚠️ 2026-09-07 실기 수정: 예전엔 check_basket_insert_gate()를 이
+    좁은 사각형(NO_ROTATION_HALF_WIDTH_M/INSET_DEPTH_M)에 재사용해 "로봇
+    위치 -> 그 사각형 안 최근접점" 방위와 robot_yaw_deg의 차이를 지향오차로
+    썼다. 그 계산은 로봇이 사각형 밖에서 어느 정도 떨어져 있을 때는 정면
+    기준 오차의 합리적인 근사였지만, 이 함수가 실제로 불리는 시점(PLACE —
+    로봇이 이미 목표 근처에 멈춰 있어 사각형 "안"이거나 경계에 걸치는
+    경우가 흔하다)에는 최근접점이 로봇 자신의 위치와 사실상 같아져
+    atan2 방위가 로봇이 실제로 어느 쪽을 보고 있는지와 무관하게 0에
+    가깝게 나온다 — "위치가 맞으면 방향도 맞다"고 잘못 판정하는 것과
+    같다. 2026-09-07 실기(체스말 두 번째 rook 투입)에서 정확히 이 경우가
+    나서(로봇 xy가 목표영역 경계와 거의 겹쳐 distance≈0) servo1 보정이
+    통째로 생략됐고(SAFE_300 로그 자체가 안 찍힘), 로봇이 실제로는 약
+    77도(정면 90도보다 13도 오블리크)로 멈춘 채 그대로 투하 시퀀스를
+    진행해 바구니를 밀었다(사용자 보고 — "진입 각도가 높았는데 거기서
+    멈추지 않고 그대로 들이받았다").
+
+    그래서 위치 기반 방위 대신, 두 상자(toy/chess) 모두 같은 세계좌표
+    방향(-y, 모듈 docstring 참고)으로 열려 있다는 고정 사실을 직접 써서
+    robot_yaw_deg를 mcfg.BOX_FACE_YAW_DEG(90도 — 세계좌표 +y를 보는
+    자세=바구니를 정면으로 보는 자세)와 곧바로 비교한다. 로봇이 그 좁은
+    목표영역 안에 있든 없든, 위치와 무관하게 "지금 이 자세 그대로 놓아도
+    정면에 가까운가"를 정확히 답한다 — tests/test_basket_target.py의
+    기존 두 테스트(로봇이 사각형 밖 15cm 지점에 있는 경우)는 이 값과
+    거의 일치해 그대로 통과한다."""
+    facing_error = facing_offset_from_square(robot_yaw_deg)
+    ok = abs(facing_error) <= NO_ROTATION_FACING_TOLERANCE_DEG
+    reason = ("무회전 영역 지향 확인" if ok else
+              f"정면(90도)에서 너무 벗어났다 ({facing_error:+.1f}deg > "
+              f"±{NO_ROTATION_FACING_TOLERANCE_DEG:.0f}deg)")
+    tx, ty = target_center(box_name)
+    rx, ry = robot_xy
+    distance = math.hypot(tx - rx, ty - ry)
+    return InsertGateResult(ok, distance, facing_error, (tx, ty), reason)
 
 
 # ---------------------------------------------------------------------------
@@ -263,7 +320,14 @@ def check_no_rotation_zone(
 # 이 반경과 무관하게 hard_stop(상자 중심 기준 순수 ArUco 반경, 아래
 # NUDGE_BOX 참고)이 항상 별도로 지킨다.
 SOUTH_APPROACH_SECTOR_RADIUS_M = MAX_APPROACH_DIST_M
-SOUTH_APPROACH_SECTOR_DEG = 120.0   # 3등분 중 접근(남쪽) 부채꼴의 폭
+# 2026-09-07 — 120도(±60도)였던 걸 60도(±30도)로 줄였다. 팔의 투하 시
+# 요 보정 한계가 MAX_DROP_YAW_OFFSET_RAD=±30도(arm_driver_node.py)라, 부채꼴
+# 가장자리로 들어오면 그 한계를 넘는 보정이 필요해져 SAFE_300에서
+# 통째로 거부되고 무보정 투하로 이어졌다(실기: 첫 룩이 바구니 오른쪽에
+# 떨어짐 — 그때 필요 보정각이 60.6도, 한계의 2배). 부채꼴 폭을 팔의
+# 실제 보정 범위(±30도)에 맞춰서, 부채꼴 안 어디로 들어와도 팔이
+# 끝까지 보정할 수 있게 한다.
+SOUTH_APPROACH_SECTOR_DEG = 60.0    # 3등분 중 접근(남쪽) 부채꼴의 폭
 _SOUTH_BEARING_DEG = -90.0          # 목표중심 기준 "정남쪽"(atan2 규약, -y)
 
 

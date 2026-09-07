@@ -102,3 +102,31 @@ def test_상자_목적지가_아니면_보정을_안_보낸다():
     fsm.step(pose, {}, link)
 
     assert link.sent[-1].yaw_correction_deg == 0.0
+
+
+def test_목표영역_경계에_걸쳐도_오블리크_각을_보정한다():
+    """2026-09-07 실기 회귀 — 로봇 xy가 넓은 목표영역(TARGET_HALF_WIDTH_M/
+    INSET_DEPTH_M) 경계와 거의 겹치면, 예전 구현(check_basket_insert_gate.
+    facing_error_deg를 그대로 보정각으로 씀)은 그 함수 내부의 distance≈0
+    함정에 걸려 실제 오블리크 각(정면 90도에서 13.6도 벗어남)과 무관하게
+    보정각을 0에 가깝게 냈다 — no_rotation_zone은 정확히 이 자세를
+    "통과 아님"으로 걸러 여기까지 왔는데, 정작 보정량 자체가 0이 되어
+    servo1이 안 움직이는 모순이 있었다(실기: rook 두 번째 투입에서 SAFE_300
+    로그 자체가 없이 그대로 밀고 들어감). basket_target.
+    facing_offset_from_square()로 바꾼 뒤에는 위치와 무관하게 실제 오블리크
+    각(-13.6도 안팎)이 그대로 실려야 한다."""
+    x_lo, x_hi, y_lo, y_hi = basket_target.target_rect("chess")
+    x, y, yaw_deg = x_lo, y_lo, 76.4   # 실제 2026-09-07 실기 기록값과 동일
+
+    assert basket_target.check_basket_insert_gate(
+        (x, y), yaw_deg, "chess").facing_error_deg == pytest.approx(0.0, abs=0.5), (
+        "이 테스트 좌표는 옛 구현이 distance≈0으로 퇴화하던 바로 그 지점이어야 한다")
+
+    fsm, link, pose = _place_fsm(x, y, yaw_deg, "rook")
+    fsm.step(pose, {}, link)
+
+    sent = link.sent[-1].yaw_correction_deg
+    assert abs(sent) > 5.0, (
+        f"목표영역 경계 위인데도 보정각이 0에 가깝다({sent:+.1f}도) — "
+        "옛 distance≈0 퇴화가 재발했을 수 있다")
+    assert sent == pytest.approx(basket_target.facing_offset_from_square(yaw_deg))

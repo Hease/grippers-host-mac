@@ -1,12 +1,17 @@
 """FACE_BOX/NUDGE_BOX가 박스 목표 방위를 맞출 때 쓰는 허용각이 일반
 주행용(DRIVE_YAW_TOLERANCE_DEG, 12도)에서 전용
-BOX_FACE_YAW_TOLERANCE_DEG(45도)로 분리됐는지 확인한다 (사용자 지시,
+BOX_FACE_YAW_TOLERANCE_DEG(20도)로 분리됐는지 확인한다 (사용자 지시,
 2026-09-05 — "FACE_BOX도 고칠 수 있으면 고쳐" + "방향무관 즉시정지").
 
-safe_300(servo 1 요 보정, ±60도까지 실기 검증됨)이 이제 드랍 직전
-잔여 오차를 팔로 흡수하므로, 차량이 회전으로 몇 도까지 좁혀야 하는지를
-다시 낮출 이유가 없다 — FACE_BOX가 더 넓은 각도에서도 빨리 통과해야
-한다."""
+safe_300(servo 1 요 보정)이 이제 드랍 직전 잔여 오차를 팔로 흡수하므로,
+차량이 회전으로 몇 도까지 좁혀야 하는지를 다시 낮출 이유가 없다 —
+FACE_BOX가 더 넓은 각도에서도 빨리 통과해야 한다.
+
+⚠️ 2026-09-07 — 원래 45도였다가 20도로 낮췄다. 팔 쪽 한계각
+(arm_driver_node.MAX_DROP_YAW_OFFSET_RAD)이 그사이 30도로 조정됐는데
+이 값이 그걸 안 따라가 45도로 남아 있어서, 30~45도 사이로 정렬해도
+FACE_BOX/NUDGE_BOX는 통과시키고 팔은 보정을 거부해 무보정 투하로
+이어지는 사고가 실기에서 났다(mission_config.py 주석 참고)."""
 
 from __future__ import annotations
 
@@ -31,10 +36,10 @@ def _fsm_facing(target_yaw_deg: float, actual_yaw_deg: float) -> tuple[MissionFS
 
 
 def test_일반_주행_허용각을_넘지만_박스_허용각_안이면_바로_통과한다():
-    """30도 오차 — DRIVE_YAW_TOLERANCE_DEG(12도)는 넘지만
-    BOX_FACE_YAW_TOLERANCE_DEG(45도) 안이다."""
-    assert 12.0 < 30.0 < mcfg.BOX_FACE_YAW_TOLERANCE_DEG
-    fsm, link = _fsm_facing(target_yaw_deg=90.0, actual_yaw_deg=60.0)
+    """15도 오차 — DRIVE_YAW_TOLERANCE_DEG(12도)는 넘지만
+    BOX_FACE_YAW_TOLERANCE_DEG(20도) 안이다."""
+    assert 12.0 < 15.0 < mcfg.BOX_FACE_YAW_TOLERANCE_DEG
+    fsm, link = _fsm_facing(target_yaw_deg=90.0, actual_yaw_deg=75.0)
 
     fsm.step(link.pose(), {}, link)
 

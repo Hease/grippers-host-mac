@@ -47,6 +47,7 @@ ANTHROPIC_API_KEY 환경변수 필요, 없으면 이 기능만 조용히 꺼진�
 from __future__ import annotations
 
 import argparse
+import math
 import queue
 import signal
 import sys
@@ -559,13 +560,70 @@ def _run_mission(args) -> int:
         # ⚠️ 링크를 그냥 닫으면 Pi 워치독(3사이클 = 0.3초)이 설 때까지
         # 바퀴가 돈다. 명시적으로 정지를 여러 번 보내 즉시 세운다.
         # UDP 라 한 발이 유실될 수 있으므로 연발한다.
+        #
+        # 이 정지 명령이 "실제로 로봇을 세운다"는 보장은 아니다 — 2026-09-07
+        # 실기 사고 참고. Pi 쪽 stop 재전송(mission_orchestrator)과 STM32
+        # 모터 워치독(ros_robot_controller_sdk.py) 둘 다 몇 분 내내 예외 없이
+        # 0속도를 계속 재전송했는데도 바퀴가 실제로는 멈추지 않았다 — 이
+        # 소프트웨어 스택 전체가 "명령은 보냈다"까지만 확인하지 "로봇이
+        # 실제로 멈췄다"는 어디서도 확인하지 않는다는 게 그날 드러났다.
         try:
             for _ in range(8):
                 link.send(MissionCommand("stop", "SEARCH_TARGET", 0.0, 0.0, 0.0))
                 time.sleep(0.05)
             print("[STOP] 정지 명령 8회 송신 완료")
         except Exception as exc:
-            print(f"[STOP] 정지 명령 실패: {exc} — Pi 워치독이 0.3초 안에 세웁니다")
+            print(f"[STOP] 정지 명령 실패: {exc} — Pi 워치독이 정지를 재시도합니다"
+                  " (보장은 아님, 아래 확인 참고)")
+
+        # 2026-09-07 실기 사고 후 추가 — 위 정지 전송·Pi 워치독만 믿고
+        # 곧장 카메라를 꺼버리면, 그 뒤로 로봇이 실제로 멈췄는지 아무도
+        # 보지 않는다(그날 사고가 정확히 그렇게 몇 분간 방치됐다). 이
+        # 저장소가 가진, Pi의 시리얼 링크와 완전히 독립된 유일한 실측
+        # 채널이 이 오버헤드 ArUco 포즈다 — 카메라를 정리하기 전에 잠깐
+        # 더 켜 두고 위치가 실제로 안 바뀌는지 직접 관찰한다. 실기 차량이
+        # 없는 실행(mock/console 링크)에서는 의미가 없어 건너뛴다.
+        if isinstance(link, UdpVehicleLink):
+            _verify_s = 2.0
+            _t0 = time.perf_counter()
+            _first_pose = None
+            _last_pose = None
+            while time.perf_counter() - _t0 < _verify_s:
+                _dets = []
+                for cap in caps:
+                    ok, frame = cap.read()
+                    _dets.append({} if not ok else
+                                 detect(detector, cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)))
+                _p = loc.update(cams, _dets)
+                if _p.ok:
+                    _first_pose = _first_pose if _first_pose is not None else _p
+                    _last_pose = _p
+                time.sleep(0.05)
+
+            _moved_m, _moved_deg = 0.0, 0.0
+            if _first_pose is not None and _last_pose is not None:
+                _moved_m = math.hypot(_last_pose.x - _first_pose.x,
+                                      _last_pose.y - _first_pose.y)
+                _moved_deg = abs(((_last_pose.yaw_deg - _first_pose.yaw_deg + 180.0)
+                                  % 360.0) - 180.0)
+
+            _STILL_MOVING_M = 0.03
+            _STILL_MOVING_DEG = 5.0
+            if _first_pose is None:
+                print(f"[STOP] {_verify_s:.1f}초 관찰 — 포즈를 못 잡았습니다. "
+                      "카메라로 직접 확인하세요")
+            elif _moved_m > _STILL_MOVING_M or _moved_deg > _STILL_MOVING_DEG:
+                print("\a\a\a", end="", flush=True)
+                print("=" * 60)
+                print("[STOP][경고] 정지 명령을 보냈는데도 로봇이 계속 움직이고 있습니다!")
+                print(f"           {_verify_s:.1f}초 동안 {_moved_m * 100:.1f}cm / "
+                      f"{_moved_deg:.1f}도 이동")
+                print("           소프트웨어로는 이 이상 못 멈출 수 있습니다 —")
+                print("           지금 바로 눈으로 확인하고, 필요하면 배터리를 뽑으세요.")
+                print("=" * 60)
+            else:
+                print(f"[STOP] {_verify_s:.1f}초 관찰 — 정지 확인됨")
+
         for worker in workers:
             worker.stop()
         for cap in caps:
