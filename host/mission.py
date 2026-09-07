@@ -36,7 +36,7 @@ sys.path.insert(0, str(Path(__file__).parent / "aruco"))
 import config as cfg
 from localizer import Pose, box_pose
 import basket_target
-from navigator import GridPathPlanner, DriveCommand, DriveMode, DriveSequencer
+from navigator import GridPathPlanner, DriveCommand, DriveMode, DriveSequencer, _obstacle_within
 from vehicle_link import (BACK_OFF, CREEP_IN, RE_AIM, GraspCorrection,
                           MissionCommand, VehicleLink)
 
@@ -238,11 +238,6 @@ def _send_drive(link: VehicleLink, pose: Pose, status: str, nav: DriveCommand,
         # 끼워 넣은, 정렬 무시한 짧은 전진 — cmd 상으로는 FORWARD와 같은
         # "go"지만 목표를 정면으로 보고 있다는 보장이 없다.
         cmd = "go"
-    elif nav.mode == DriveMode.BACK:
-        # 장애물이 차량 반경 안이거나 회피 회전이 45도를 넘어서(navigator.
-        # DriveSequencer._choose_after_stop/AVOID_YAW_LIMIT_DEG) 회전 대신
-        # 후진한다(2026-09-07, 사용자 지시).
-        cmd = "back"
     else:   # ROTATE
         cmd = "yaw+" if nav.yaw_error_deg >= 0 else "yaw-"
     link.send(MissionCommand(
@@ -538,6 +533,44 @@ class MissionFSM:
         아니라 이 값으로 해야 한다(부분목표는 중간 지점일 뿐이라, 그걸로
         판정하면 아직 한 축 남았는데 도착했다고 착각한다)."""
         self.nav_goal = target_xy
+
+        # 2026-09-07 저녁 — 낮에 넣었던 "장애물이 차량 반경 안이면 후진"
+        # (navigator.DriveMode.BACK)이 RETURN_HOME에서 후진이 2초 넘게
+        # 안 멎는 사고로 이어져, 사용자 지시("회피를 위한 후진은 빼자")로
+        # 그 로직 전체를 없앴다. 대신 여기서 그 자리에 완전히 멈추고,
+        # 이미 검증된 GridPathPlanner의 격자 회피(여러 장애물을 안전하게
+        # 피하는, next_waypoint의 단일 장애물 우회점 방식과 달리 왕복
+        # 버그가 없는 경로계획)에 다시 판단을 맡긴다 — 후진이라는 새
+        # 동작을 추가하는 대신 기존에 신뢰하는 계획기를 신뢰하는 쪽이다.
+        #
+        # `_path_planner.reset()`을 같이 부르는 이유: GridPathPlanner는
+        # "로봇 위치가 그때와 비슷하면(PATH_REPLAN_MIN_MOVE_M 이내) 다시
+        # 계산 안 하고 얼려 둔 결과를 그대로 돌려준다"는 캐시가 있는데,
+        # 그 캐시는 로봇 위치만 보고 장애물 배치 변화는 안 본다. 지금
+        # 멈추면 다음 사이클도 위치가 거의 그대로라 캐시가 계속 재사용될
+        # 텐데, 그 캐시는 "장애물이 이렇게 가까워지기 전" 계산이라 못
+        # 믿는다 — reset으로 지워 두면, 이 정지가 풀리고 다시 움직일 때
+        # 지금의(가까워진) 장애물 배치를 반영한 새 부분목표가 나온다.
+        #
+        # ⚠️ 실기 미검증 — 오늘(2026-09-07) 배터리 저전압으로 실기 검증을
+        # 못 하고 코드·단위테스트만으로 마감했다. 다음 실기에서 "장애물에
+        # 너무 가까워지면 그 자리에 서고, 풀리면 자연스럽게 돌아가는가"를
+        # 확인할 것.
+        if _obstacle_within(robot_xy, obstacles, mcfg.ROBOT_RADIUS_PIECE_M):
+            self._path_planner.reset()
+            self.nav_corner = None
+            self.nav_path = None
+            dist_now = math.hypot(target_xy[0] - robot_xy[0], target_xy[1] - robot_xy[1])
+            stop_nav = DriveCommand(
+                mode=DriveMode.STOP, waypoint=robot_xy,
+                target_yaw_deg=pose.yaw_deg, yaw_error_deg=0.0,
+                dist_to_target=dist_now, blocked_by="piece",
+            )
+            self.last_nav = stop_nav
+            self.last_cmd = _send_drive(link, pose, self.state.name, stop_nav,
+                                        target_label=target_label)
+            return dist_now
+
         # 회피는 GridPathPlanner 가 격자 탐색으로 전부 처리한다 —
         # DriveSequencer/next_waypoint 쪽엔 장애물을 안 넘긴다. 거기 회피
         # 로직은 가장 가까운 장애물 하나만 보고 우회점을 잡아서, 서로 밀어내는
