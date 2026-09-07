@@ -59,16 +59,35 @@ def test_목표창_안이라는_신호를_받으면_계획_거리_전에_바로_
     assert link.basket_ready_early is False
 
 
-def test_너무_가깝다는_보정을_받으면_계획_거리_전에_바로_PLACE로_넘어간다():
+def test_Pi_라이다_보정은_더_이상_영향을_주지_않는다():
+    """2026-09-07, 사용자 지시("라이다는 그냥 다 지워") — 예전엔
+    link.last_basket_fix(forward_m<0, Pi의 retreat_if_too_close 보고)를
+    받으면 계획 거리 전에 바로 PLACE로 넘어갔다. 그 보고 자체를 Pi 쪽에서
+    없앴고(baseline_mission.py 참고), Host도 이제 이 값을 안 본다 — 여기
+    억지로 채워 넣어도 아무 효과가 없어야 한다(회귀 방지)."""
     fsm, link = _nudge_fsm()
     link.last_basket_fix = BasketFix(forward_m=-0.02)
 
     fsm.step(link.pose(), {}, link)
 
+    assert fsm.state == State.NUDGE_BOX
+
+
+def test_상자_중심에_너무_가까우면_ArUco_판정만으로_계획_거리_전에_PLACE로_넘어간다():
+    """"너무 가깝다 -> 일찍 끝낸다"는 여전히 하되, 이제 Host 자신의 ArUco
+    거리(mission_config.BASKET_BACK_TRIGGER_MARGIN_M)로 판단한다 — Pi
+    보고는 전혀 관여하지 않는다."""
+    import config as cfg
+    from localizer import box_pose
+
+    fsm, link = _nudge_fsm()
+    bx, by, _ = box_pose("chess")   # target_label="rook" -> PIECE_DEST_BOX -> "chess"
+    close_r = cfg.BOX_L / 2.0 + mcfg.BASKET_BACK_TRIGGER_MARGIN_M - 0.01
+    link.x, link.y = bx, by + close_r   # 상자 중심에서 그 반경 안쪽
+
+    fsm.step(link.pose(), {}, link)
+
     assert fsm.state == State.PLACE
-    # PLACE 가 이걸 소비해서 다음 보정을 계산해야 한다 — NUDGE_BOX 는
-    # 넘어가는 신호로만 쓰고 지우지 않는다.
-    assert link.last_basket_fix is not None
 
 
 def test_너무_멀다는_보정은_PLACE의_잔여_보고로_보고_무시한다():

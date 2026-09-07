@@ -263,7 +263,14 @@ def check_no_rotation_zone(
 # 이 반경과 무관하게 hard_stop(상자 중심 기준 순수 ArUco 반경, 아래
 # NUDGE_BOX 참고)이 항상 별도로 지킨다.
 SOUTH_APPROACH_SECTOR_RADIUS_M = MAX_APPROACH_DIST_M
-SOUTH_APPROACH_SECTOR_DEG = 120.0   # 3등분 중 접근(남쪽) 부채꼴의 폭
+# 2026-09-07 — 120도(±60도)였던 걸 60도(±30도)로 줄였다. 팔의 투하 시
+# 요 보정 한계가 MAX_DROP_YAW_OFFSET_RAD=±30도(arm_driver_node.py)라, 부채꼴
+# 가장자리로 들어오면 그 한계를 넘는 보정이 필요해져 SAFE_300에서
+# 통째로 거부되고 무보정 투하로 이어졌다(실기: 첫 룩이 바구니 오른쪽에
+# 떨어짐 — 그때 필요 보정각이 60.6도, 한계의 2배). 부채꼴 폭을 팔의
+# 실제 보정 범위(±30도)에 맞춰서, 부채꼴 안 어디로 들어와도 팔이
+# 끝까지 보정할 수 있게 한다.
+SOUTH_APPROACH_SECTOR_DEG = 60.0    # 3등분 중 접근(남쪽) 부채꼴의 폭
 _SOUTH_BEARING_DEG = -90.0          # 목표중심 기준 "정남쪽"(atan2 규약, -y)
 
 

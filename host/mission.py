@@ -238,6 +238,11 @@ def _send_drive(link: VehicleLink, pose: Pose, status: str, nav: DriveCommand,
         # 끼워 넣은, 정렬 무시한 짧은 전진 — cmd 상으로는 FORWARD와 같은
         # "go"지만 목표를 정면으로 보고 있다는 보장이 없다.
         cmd = "go"
+    elif nav.mode == DriveMode.BACK:
+        # 장애물이 차량 반경 안이거나 회피 회전이 45도를 넘어서(navigator.
+        # DriveSequencer._choose_after_stop/AVOID_YAW_LIMIT_DEG) 회전 대신
+        # 후진한다(2026-09-07, 사용자 지시).
+        cmd = "back"
     else:   # ROTATE
         cmd = "yaw+" if nav.yaw_error_deg >= 0 else "yaw-"
     link.send(MissionCommand(
@@ -547,8 +552,17 @@ class MissionFSM:
             robot_xy, pose.yaw_deg, target_xy, obstacles)
         self.nav_corner = corner
         self.nav_path = self._path_planner.last_path
+        # avoidance_obstacles: next_waypoint용 obstacles([])와 다르다 —
+        # ESCAPE(정렬 무시 강제 전진) 동안 "이 방향 그대로 가도 되는가",
+        # 그리고 회전 대신 후진해야 하는가(장애물이 차량 반경 안·회피각이
+        # 45도 초과)를 보는 별도 안전판이다(2026-09-07, 사용자 지시 —
+        # 실기에서 ESCAPE 도중 축구공을 못 피하고 그대로 들이받은 사고,
+        # 그리고 "back 트리거를 host에게 맡기고" 지시 이후). navigator.
+        # DriveSequencer.update() 주석 참고 — next_waypoint의 우회점 계산을
+        # 재사용하지 않는 이유가 거기 있다.
         escape_count_before = self._drive.escape_count
-        nav = self._drive.update(robot_xy, pose.yaw_deg, sub_goal, [])
+        nav = self._drive.update(robot_xy, pose.yaw_deg, sub_goal, [],
+                                 avoidance_obstacles=obstacles)
         if self._drive.escape_count > escape_count_before:
             # 2026-09-05: 사용자가 "yaw 진동으로 시간이 지체된다"고 보고해서
             # 추가한 계측 — DriveSequencer.escape_count 정의부 참고. 값을
@@ -1366,16 +1380,39 @@ class MissionFSM:
             # 멈춘 것으로 치고 `_plan_basket_fix`의 예산(BASKET_CREEP_BUDGET_M)
             # 을 또 청구해 몇 사이클 만에 소진시켜 버린다(실측: 0.376m→
             # 0.372m 두 판독이 사실상 제자리인데 예산 0.40m 를 통째로 태워
-            # 이후 계속 INSERT_BLOCKED 만 반복). 라이브 점검
-            # (baseline_mission.BaselineCarryState)이 실제로 보내는 것은
-            # `retreat_if_too_close` 뿐이고, 그건 언제나 forward_m 이
-            # 음수다 — 그래서 음수일 때만 "지금 막 온 라이브 신호"로 믿는다.
-            # 0 이상(양수/None)은 PLACE 국면의 잔여 보고로 보고 무시한다 —
-            # PLACE 가 want_m 완주 후 다시 물어서 정식으로 처리한다.
+            # 이후 계속 INSERT_BLOCKED 만 반복).
+            #
+            # ⚠️ 2026-09-07, 사용자 지시("라이다 없애... back 트리거를
+            # host에게 맡기고") — live_too_close는 예전에 Pi의 실시간
+            # 라이다 보고(baseline_mission.BaselineCarryState의
+            # retreat_if_too_close, 언제나 forward_m<0)를 그대로 믿었다.
+            # 그런데 그 판정이 라이다 하한(BASKET_MIN_LIDAR_M) 바로
+            # 근처에서 판독이 흔들려, 실제로는 괜찮은 상황에서도
+            # INSERT_BLOCKED가 계속 뜨는 문제가 실기로 확인됐다(2026-09-07,
+            # 세 번째 기물 INSERT에서 12초 넘게 NUDGE_BOX<->PLACE 왕복).
+            # Pi 쪽 그 판정 자체를 없앴으므로(baseline_mission.py 참고)
+            # 여기서도 그 값을 더는 못 믿는다 — 대신 아래 hard_stop과 같은
+            # 방식(상자 중심까지의 순수 ArUco 거리)으로, 다만 hard_stop보다
+            # 넉넉한 반경(BASKET_BACK_TRIGGER_MARGIN_M)에서 미리 걸리게
+            # 한다. 이러면 실제로 hard_stop(완전정지) 반경에 닿기 전에 이
+            # 판단으로 먼저 후진해 빠져나온다.
             link.poll_status()
-            fix = link.last_basket_fix
-            live_too_close = fix is not None and fix.forward_m is not None \
-                and fix.forward_m < 0
+            dest_box_name = mcfg.PIECE_DEST_BOX.get(self.target_label)
+            dist_to_box_center = None
+            if dest_box_name is not None:
+                box_x, box_y, _box_yaw = box_pose(dest_box_name)
+                dist_to_box_center = math.hypot(robot_xy[0] - box_x,
+                                                robot_xy[1] - box_y)
+            live_too_close = (
+                dist_to_box_center is not None
+                and dist_to_box_center <= (cfg.BOX_L / 2.0
+                                           + mcfg.BASKET_BACK_TRIGGER_MARGIN_M))
+            # `fix`(예전 link.last_basket_fix)는 이제 항상 None이다 — 위에서
+            # 그 공급원(Pi의 retreat_if_too_close 라이브 점검)을 없앴다.
+            # 아래 회전판 done_confirmed와 진전 정체 판정(pi_error)이 여전히
+            # `fix is not None`을 검사하므로, 이름만 남겨 그 분기들이 항상
+            # ArUco 폴백으로 떨어지게 한다(NameError 방지 겸 의도 표시).
+            fix = None
             # 2026-09-03 실기(rook/box, 두 바구니 다): 여기서 매 사이클
             # take_basket_ready_early()를 무조건 소비해서 회전(rotate)·좌우
             # (left/right) 축의 "끝났다"에도 같이 넣고 있었다. 그런데
@@ -1407,12 +1444,10 @@ class MissionFSM:
             # `_plan_basket_fix`는 너무 가까우면(forward_m<0) 애초에 axis
             # ="back" 계획을 낸다 — 이 반경 안에서 가장 먼저 나올 계획이
             # 바로 그것이다.
+            # dest_box_name/dist_to_box_center는 위 live_too_close에서 이미
+            # 구했다 — 여기서 다시 box_pose()를 부르지 않고 그대로 쓴다.
             hard_stop = False
-            dest_box_name = mcfg.PIECE_DEST_BOX.get(self.target_label)
             if dest_box_name is not None:
-                box_x, box_y, _box_yaw = box_pose(dest_box_name)
-                dist_to_box_center = math.hypot(robot_xy[0] - box_x,
-                                                robot_xy[1] - box_y)
                 hard_radius = cfg.BOX_L / 2.0 + mcfg.BASKET_HARD_STOP_MARGIN_M
                 hard_stop = dist_to_box_center <= hard_radius
             # 사용자 지시(2026-09-04): 정면으로 딱 맞춰 서는 것을 강제하지
@@ -1462,17 +1497,17 @@ class MissionFSM:
             # live_too_close·hard_stop·ready_early)는 이미 그 자체로
             # 재확인이니 debounce가 필요 없다.
             if is_rotate:
-                if fix is not None and fix.yaw_rad is not None:
-                    # 회전판은 Pi 라이다가 직접 확인해 줄 때만 "끝났다"로
-                    # 본다 — check_insert가 실제로 판정하는 기준과 맞춘다.
-                    # gate_ok를 여기 넣지 않는다 — 위 2026-09-05 코멘트 참고.
-                    done_confirmed = (
-                        abs(fix.yaw_rad) <= mcfg.NUDGE_ROTATE_DIAGONAL_TOLERANCE_RAD
-                        or live_too_close or hard_stop)
-                else:
-                    # Pi 값이 아직 없을 때만 쓰는 ArUco 폴백. ready_early는
-                    # 절대 안 넣는다 — 위 주석 참고.
-                    done_confirmed = moved >= want_m or live_too_close or hard_stop
+                # ⚠️ 2026-09-07 — 예전엔 여기서 Pi의 실시간 라이다 요
+                # 실측(fix.yaw_rad)이 NUDGE_ROTATE_DIAGONAL_TOLERANCE_RAD
+                # (20도) 안이면 그 자리에서 그만 돌게 했다. 그 신호의 유일한
+                # 공급원이 Pi의 라이브 라이다 점검(baseline_mission.
+                # BaselineCarryState의 retreat_if_too_close)이었는데, 그
+                # 판정이 라이다 하한 근처에서 흔들려 실제로는 괜찮은데도
+                # INSERT_BLOCKED가 계속 뜨는 문제가 확인돼(위 live_too_close
+                # 주석 참고) Pi 쪽에서 아예 없앴다 — 그래서 이제 이 미세조정은
+                # 못 받는다. ArUco 데드레커닝(moved>=want_m) 폴백만 남는다.
+                # ready_early는 절대 안 넣는다(위 주석 참고).
+                done_confirmed = moved >= want_m or live_too_close or hard_stop
                 host_gate_hit = gate_ok
             elif axis in ("left", "right"):
                 done_confirmed = moved >= want_m or live_too_close or hard_stop
